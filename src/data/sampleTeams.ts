@@ -1,0 +1,117 @@
+import { Team } from '../types';
+import { BOSS_PRESETS, MEMBER_PRESETS } from './presetAgents';
+
+export const INITIAL_TEAMS: Team[] = [
+  {
+    id: 'team-digital-marketing',
+    name: 'Digital Marketing & Growth Team',
+    businessContext: 'Bisnis Kuliner UMKM (Sambal Kemasan & Frozen Food)',
+    createdAt: new Date().toISOString(),
+    boss: {
+      id: 'boss-herman',
+      type: 'boss',
+      name: BOSS_PRESETS[0].name,
+      role: 'boss',
+      roleTitle: BOSS_PRESETS[0].title,
+      avatar: BOSS_PRESETS[0].avatar,
+      color: BOSS_PRESETS[0].color,
+      systemPrompt: BOSS_PRESETS[0].systemPrompt,
+      model: 'gemini-3.6-flash',
+      active: true,
+    },
+    members: [
+      {
+        id: 'member-marco',
+        type: 'member',
+        name: MEMBER_PRESETS[0].name,
+        role: MEMBER_PRESETS[0].role,
+        roleTitle: MEMBER_PRESETS[0].roleTitle,
+        avatar: MEMBER_PRESETS[0].avatar,
+        color: MEMBER_PRESETS[0].color,
+        systemPrompt: MEMBER_PRESETS[0].systemPrompt,
+        model: MEMBER_PRESETS[0].model,
+        active: true,
+      },
+      {
+        id: 'member-rio',
+        type: 'member',
+        name: MEMBER_PRESETS[2].name,
+        role: MEMBER_PRESETS[2].role,
+        roleTitle: MEMBER_PRESETS[2].roleTitle,
+        avatar: MEMBER_PRESETS[2].avatar,
+        color: MEMBER_PRESETS[2].color,
+        systemPrompt: MEMBER_PRESETS[2].systemPrompt,
+        model: MEMBER_PRESETS[2].model,
+        active: true,
+      },
+      {
+        id: 'member-kobe',
+        type: 'member',
+        name: MEMBER_PRESETS[3].name,
+        role: MEMBER_PRESETS[3].role,
+        roleTitle: MEMBER_PRESETS[3].roleTitle,
+        avatar: MEMBER_PRESETS[3].avatar,
+        color: MEMBER_PRESETS[3].color,
+        systemPrompt: MEMBER_PRESETS[3].systemPrompt,
+        model: MEMBER_PRESETS[3].model,
+        active: true,
+      }
+    ]
+  },
+  {
+    id: 'team-sales-finance',
+    name: 'Tim Operasional, Sales & Keuangan',
+    businessContext: 'Toko Online Fashion & Hijab Local Brand',
+    createdAt: new Date().toISOString(),
+    boss: {
+      id: 'boss-nova',
+      type: 'boss',
+      name: BOSS_PRESETS[2].name,
+      role: 'boss',
+      roleTitle: BOSS_PRESETS[2].title,
+      avatar: BOSS_PRESETS[2].avatar,
+      color: BOSS_PRESETS[2].color,
+      systemPrompt: BOSS_PRESETS[2].systemPrompt,
+      model: 'gemini-3.6-flash',
+      active: true,
+    },
+    members: [
+      {
+        id: 'member-sandi',
+        type: 'member',
+        name: MEMBER_PRESETS[1].name,
+        role: MEMBER_PRESETS[1].role,
+        roleTitle: MEMBER_PRESETS[1].roleTitle,
+        avatar: MEMBER_PRESETS[1].avatar,
+        color: MEMBER_PRESETS[1].color,
+        systemPrompt: MEMBER_PRESETS[1].systemPrompt,
+        model: MEMBER_PRESETS[1].model,
+        active: true,
+      },
+      {
+        id: 'member-kelly',
+        type: 'member',
+        name: MEMBER_PRESETS[6].name,
+        role: MEMBER_PRESETS[6].role,
+        roleTitle: MEMBER_PRESETS[6].roleTitle,
+        avatar: MEMBER_PRESETS[6].avatar,
+        color: MEMBER_PRESETS[6].color,
+        systemPrompt: MEMBER_PRESETS[6].systemPrompt,
+        model: MEMBER_PRESETS[6].model,
+        active: true,
+      },
+      {
+        id: 'member-clara',
+        type: 'member',
+        name: MEMBER_PRESETS[8].name,
+        role: MEMBER_PRESETS[8].role,
+        roleTitle: MEMBER_PRESETS[8].roleTitle,
+        avatar: MEMBER_PRESETS[8].avatar,
+        color: MEMBER_PRESETS[8].color,
+        systemPrompt: MEMBER_PRESETS[8].systemPrompt,
+        model: MEMBER_PRESETS[8].model,
+        active: true,
+      }
+    ]
+  }
+];

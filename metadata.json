@@ -1,0 +1,6 @@
+{
+  "name": "UMKM Virtual Team",
+  "description": "Platform AI Multi-Agent Team untuk UMKM Indonesia - Kolaborasi Boss & Tim Agent Spesialis",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
