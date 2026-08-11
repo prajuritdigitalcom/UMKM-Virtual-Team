@@ -55,6 +55,38 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
   const [activeTab, setActiveTab] = useState<'synthesis' | 'agent_results'>('synthesis');
   const [selectedAgentResultId, setSelectedAgentResultId] = useState<string | null>(null);
 
+  // Load saved currentJob for active team from localStorage
+  React.useEffect(() => {
+    try {
+      const savedJob = localStorage.getItem(`umkm_active_job_${team.id}`);
+      if (savedJob) {
+        const parsed = JSON.parse(savedJob);
+        if (parsed.status === 'running') {
+          parsed.status = 'error';
+        }
+        setCurrentJob(parsed);
+      } else {
+        setCurrentJob(null);
+      }
+    } catch (e) {
+      console.error('Failed to load saved active job:', e);
+      setCurrentJob(null);
+    }
+  }, [team.id]);
+
+  // Persist currentJob to localStorage when updated
+  React.useEffect(() => {
+    if (!currentJob) {
+      localStorage.removeItem(`umkm_active_job_${team.id}`);
+      return;
+    }
+    try {
+      localStorage.setItem(`umkm_active_job_${team.id}`, JSON.stringify(currentJob));
+    } catch (e) {
+      console.error('Failed to persist active job:', e);
+    }
+  }, [currentJob, team.id]);
+
   // Active agents count
   const activeMembers = team.members.filter((m) => m.active);
   const totalAgents = team.members.length + 1; // Members + Boss

@@ -1,11 +1,7 @@
 import express from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
@@ -13,9 +9,45 @@ const PORT = 3000;
 app.use(express.json({ limit: '10mb' }));
 
 // ----------------------------------------------------
+// RATE LIMITER MIDDLEWARE (PROTECT API QUOTA)
+// ----------------------------------------------------
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+function apiRateLimiter(maxRequests: number, windowMs: number) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip = (
+      (req.headers['x-forwarded-for'] as string) ||
+      req.socket.remoteAddress ||
+      'unknown'
+    )
+      .split(',')[0]
+      .trim();
+    const now = Date.now();
+    const record = rateLimitMap.get(ip) || { count: 0, resetTime: now + windowMs };
+
+    if (now > record.resetTime) {
+      record.count = 0;
+      record.resetTime = now + windowMs;
+    }
+
+    record.count++;
+    rateLimitMap.set(ip, record);
+
+    if (record.count > maxRequests) {
+      return res.status(429).json({
+        error: 'Terlalu banyak permintaan (rate limit). Silakan tunggu 1 menit sebelum mencoba lagi.',
+      });
+    }
+
+    next();
+  };
+}
+
+// Apply rate limiter on all /api routes (60 requests per minute per IP)
+app.use('/api', apiRateLimiter(60, 60 * 1000));
+
+// ----------------------------------------------------
 // MULTI-KEY ROLLING & FAILOVER LOGIC
 // ----------------------------------------------------
-let keyRotationCounter = 0;
 const keyCooldowns = new Map<string, number>();
 
 function getAvailableKeys(req: express.Request): string[] {
@@ -30,7 +62,9 @@ function getAvailableKeys(req: express.Request): string[] {
 }
 
 function isKeyRelatedError(message: string): boolean {
-  return /api key not valid|permission denied|unauthenticated|quota|429|rate limit|resource_exhausted|invalid_argument.*key/i.test(message || '');
+  return /api key not valid|permission denied|unauthenticated|quota|429|rate limit|resource_exhausted|invalid_argument.*key/i.test(
+    message || ''
+  );
 }
 
 interface FailoverResult {
@@ -51,64 +85,45 @@ async function generateWithKeyFailover(
   const attemptsLog: string[] = [];
   let lastError: any = null;
 
+  // Pick a starting index per request to isolate rotation across sessions
+  const startOffset = Math.floor(Math.random() * keys.length);
+
   for (let i = 0; i < keys.length; i++) {
-    const idx = (keyRotationCounter + i) % keys.length;
+    const idx = (startOffset + i) % keys.length;
     const apiKey = keys[idx];
     const keySuffix = apiKey.length >= 4 ? apiKey.slice(-4) : apiKey;
 
     const cooldownUntil = keyCooldowns.get(apiKey) || 0;
     if (Date.now() < cooldownUntil && keys.length > 1) {
-      attemptsLog.push(`Key ...${keySuffix} dilewati (cooldown 30s)`);
+      attemptsLog.push(`[Key ...${keySuffix}] Sedang cooldown, melompati key ini.`);
       continue;
     }
 
     try {
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-      });
+      const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent(params);
-      keyRotationCounter = (idx + 1) % keys.length;
-      attemptsLog.push(`Key ...${keySuffix} berhasil`);
+      attemptsLog.push(`[Key ...${keySuffix}] Berhasil dieksekusi.`);
       return { response, keyUsedSuffix: keySuffix, attemptsLog };
     } catch (err: any) {
       lastError = err;
-      const errMsg = err.message || String(err);
-      attemptsLog.push(`Key ...${keySuffix} gagal: ${errMsg}`);
+      const errMsg = err?.message || String(err);
+      attemptsLog.push(`[Key ...${keySuffix}] Error: ${errMsg}`);
 
-      const isTransientServerError = /503|502|500|ECONNRESET|ETIMEDOUT|UNAVAILABLE|overloaded/i.test(errMsg);
-      const shouldRotateKey = (isKeyRelatedError(errMsg) || isTransientServerError) && keys.length > 1;
-
-      if (shouldRotateKey) {
-        keyCooldowns.set(apiKey, Date.now() + 30_000);
-        continue;
+      if (isKeyRelatedError(errMsg)) {
+        // Cooldown key for 5 minutes
+        keyCooldowns.set(apiKey, Date.now() + 5 * 60 * 1000);
+        console.warn(`[API Key Failover] Key ...${keySuffix} bermasalah. Mencoba key berikutnya...`);
+      } else {
+        // Non-key error (syntax, content policy, etc) - throw immediately
+        throw err;
       }
-      throw err;
-    }
-  }
-
-  // Fallback if all keys were skipped due to active cooldown
-  if (attemptsLog.length > 0 && attemptsLog.every((log) => log.includes('dilewati'))) {
-    const apiKey = keys[keyRotationCounter % keys.length];
-    const keySuffix = apiKey.length >= 4 ? apiKey.slice(-4) : apiKey;
-    try {
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-      });
-      const response = await ai.models.generateContent(params);
-      return {
-        response,
-        keyUsedSuffix: keySuffix,
-        attemptsLog: [...attemptsLog, `Key ...${keySuffix} dipaksa coba (semua cooldown)`],
-      };
-    } catch (err: any) {
-      lastError = err;
     }
   }
 
   throw new Error(
-    `Semua ${keys.length} API Key gagal digunakan. Error terakhir: ${lastError?.message || 'Unknown error'}`
+    `Seluruh API Key (${keys.length} key) gagal dieksekusi. Error terakhir: ${
+      lastError?.message || 'Unknown error'
+    }`
   );
 }
 
@@ -235,14 +250,30 @@ Setiap elemen array mewakili sub-tugas untuk 1 agent:
 
     // Sanitize and validate agentIds in plans against activeMembers
     const validMemberIds = new Set(activeMembers.map((m) => m.id));
+    const fallbackWarnings: any[] = [];
+
     plans = plans.map((p) => {
       let matchedMember = activeMembers.find((m) => m.id === p.agentId);
       if (!matchedMember) {
         // Fallback match by role or agentName
         matchedMember =
           activeMembers.find((m) => m.role === p.role) ||
-          activeMembers.find((m) => m.name.toLowerCase() === (p.agentName || '').toLowerCase()) ||
-          activeMembers[0];
+          activeMembers.find((m) => m.name.toLowerCase() === (p.agentName || '').toLowerCase());
+
+        if (matchedMember) {
+          fallbackWarnings.push({
+            agentId: p.agentId,
+            agentName: matchedMember.name,
+            message: `Boss AI mengirim ID agent tidak dikenal ("${p.agentId}"), sistem otomatis mencocokkan ke ${matchedMember.name} (${matchedMember.roleTitle}) berdasarkan role/nama terdekat.`,
+          });
+        } else {
+          matchedMember = activeMembers[0];
+          fallbackWarnings.push({
+            agentId: p.agentId,
+            agentName: matchedMember ? matchedMember.name : 'System',
+            message: `Boss AI mengirim ID agent tidak dikenal ("${p.agentId}"), dan tidak ditemukan kecocokan. Sub-tugas terpaksa dialokasikan ke ${matchedMember ? matchedMember.name : 'Agent Pertama'}.`,
+          });
+        }
       }
       return {
         ...p,
@@ -257,7 +288,7 @@ Setiap elemen array mewakili sub-tugas untuk 1 agent:
 
     const coverageWarnings = auditAgentCoverage(plans, activeMembers);
     const dependencyWarnings = auditPlanDependencies(plans, activeMembers);
-    const warnings = [...coverageWarnings, ...dependencyWarnings];
+    const warnings = [...fallbackWarnings, ...coverageWarnings, ...dependencyWarnings];
 
     res.json({
       plans,
@@ -392,10 +423,10 @@ Ingat Standar Kualitas "Super Strong":
     let accumulatedResult = '';
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
-    let currentPrompt = promptText;
+    let contentsHistory: any[] = [{ role: 'user', parts: [{ text: promptText }] }];
     let isFinished = false;
     let attempts = 0;
-    const maxContinuations = 3;
+    const maxContinuations = 2; // Reduced for specialist agents to optimize token usage
     let lastKeyUsedSuffix = '';
     const allAttemptsLogs: string[] = [];
 
@@ -404,10 +435,10 @@ Ingat Standar Kualitas "Super Strong":
 
       const { response, keyUsedSuffix, attemptsLog } = await generateWithKeyFailover(req, {
         model: agent.model || 'gemini-3.6-flash',
-        contents: currentPrompt,
+        contents: contentsHistory,
         config: {
           systemInstruction: agent.systemPrompt,
-          maxOutputTokens: 65536,
+          maxOutputTokens: 16384, // Optimized token budget for specialist agents
           thinkingConfig: {
             thinkingLevel: ThinkingLevel.MEDIUM,
           },
@@ -429,12 +460,15 @@ Ingat Standar Kualitas "Super Strong":
 
       if (finishReason === 'MAX_TOKENS') {
         console.warn(`[Agent ${agent.name}] Response truncated (MAX_TOKENS). Continuation attempt ${attempts}...`);
-        currentPrompt = `
-Berikut adalah teks yang baru saja kamu hasilkan sebelumnya:
-"${chunk.slice(-500)}"
-
-Teks sebelumnya terpotong karena batas panjang output. TOLONG LANJUTKAN tulisan tersebut secara persis dari kata terakhir, tanpa mengulang bagian yang sudah ditulis, sampai selesai sempurna.
-`;
+        contentsHistory.push({ role: 'model', parts: [{ text: chunk }] });
+        contentsHistory.push({
+          role: 'user',
+          parts: [
+            {
+              text: 'Output sebelumnya terpotong karena batas panjang output. TOLONG LANJUTKAN tulisan tersebut secara persis dari kata terakhir, tanpa mengulang bagian yang sudah ditulis, sampai selesai sempurna.',
+            },
+          ],
+        });
       } else {
         isFinished = true;
       }
@@ -508,7 +542,7 @@ Format Laporan Akhir Disarankan:
     let accumulatedSynthesis = '';
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
-    let currentPrompt = promptText;
+    let contentsHistory: any[] = [{ role: 'user', parts: [{ text: promptText }] }];
     let isFinished = false;
     let attempts = 0;
     const maxContinuations = 3;
@@ -520,7 +554,7 @@ Format Laporan Akhir Disarankan:
 
       const { response, keyUsedSuffix, attemptsLog } = await generateWithKeyFailover(req, {
         model: boss.model || 'gemini-3.6-flash',
-        contents: currentPrompt,
+        contents: contentsHistory,
         config: {
           systemInstruction: boss.systemPrompt,
           maxOutputTokens: 65536,
@@ -545,12 +579,15 @@ Format Laporan Akhir Disarankan:
 
       if (finishReason === 'MAX_TOKENS') {
         console.warn(`[Boss Synthesis] Response truncated (MAX_TOKENS). Continuation attempt ${attempts}...`);
-        currentPrompt = `
-Berikut adalah bagian akhir laporan yang baru saja kamu tulis:
-"${chunk.slice(-500)}"
-
-Laporan sebelumnya terpotong karena batas panjang output. TOLONG LANJUTKAN laporan tersebut secara persis dari kata terakhir, tanpa mengulang bagian yang sudah ditulis, sampai selesai sempurna hingga bagian penutup.
-`;
+        contentsHistory.push({ role: 'model', parts: [{ text: chunk }] });
+        contentsHistory.push({
+          role: 'user',
+          parts: [
+            {
+              text: 'Laporan sebelumnya terpotong karena batas panjang output. TOLONG LANJUTKAN laporan tersebut secara persis dari kata terakhir, tanpa mengulang bagian yang sudah ditulis, sampai selesai sempurna hingga bagian penutup.',
+            },
+          ],
+        });
       } else {
         isFinished = true;
       }
@@ -575,56 +612,7 @@ Laporan sebelumnya terpotong karena batas panjang output. TOLONG LANJUTKAN lapor
 });
 
 // ----------------------------------------------------
-// 4. FILE EXPORT ENDPOINT
-// ----------------------------------------------------
-app.post('/api/export', (req, res) => {
-  try {
-    const { format, title, content } = req.body;
-    const cleanTitle = (title || 'Laporan_UMKM_Virtual_Team').replace(/[^a-zA-Z0-9_-]/g, '_');
-
-    if (format === 'csv') {
-      const lines = content.split('\n');
-      const csvContent = lines.map((line: string) => `"${line.replace(/"/g, '""')}"`).join('\n');
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename="${cleanTitle}.csv"`);
-      return res.send(csvContent);
-    }
-
-    if (format === 'docx' || format === 'doc') {
-      const docHtml = `
-        <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-        <head><title>${title}</title>
-        <style>
-          body { font-family: 'Calibri', 'Arial', sans-serif; margin: 20px; line-height: 1.6; }
-          h1 { color: #1e3a8a; }
-          h2 { color: #1d4ed8; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
-          h3 { color: #374151; }
-          code, pre { background: #f3f4f6; padding: 4px 8px; font-family: monospace; }
-        </style>
-        </head>
-        <body>
-          <h1>${title}</h1>
-          <p><i>Generated by UMKM Virtual Team - ${new Date().toLocaleDateString('id-ID')}</i></p>
-          <hr/>
-          <div>${content.replace(/\n/g, '<br/>')}</div>
-        </body>
-        </html>
-      `;
-      res.setHeader('Content-Type', 'application/msword');
-      res.setHeader('Content-Disposition', `attachment; filename="${cleanTitle}.doc"`);
-      return res.send(docHtml);
-    }
-
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${cleanTitle}.txt"`);
-    return res.send(content);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Export failed' });
-  }
-});
-
-// ----------------------------------------------------
-// 5. VITE / STATIC MIDDLEWARE SETUP
+// 4. VITE / STATIC MIDDLEWARE SETUP
 // ----------------------------------------------------
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {

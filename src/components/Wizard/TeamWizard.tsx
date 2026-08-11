@@ -50,24 +50,29 @@ export const TeamWizard: React.FC<TeamWizardProps> = ({
     []
   );
 
-  // Whenever selectedMemberRoles change, initialize configuredMembers
+  // Whenever selectedMemberRoles change, reconcile configuredMembers (preserving custom user inputs)
   React.useEffect(() => {
-    const updated = selectedMemberRoles.map((role) => {
-      const preset = MEMBER_PRESETS.find((m) => m.role === role)!;
-      return {
-        id: `agent-${role}-${Date.now()}`,
-        type: 'member' as const,
-        name: preset.name,
-        role: preset.role,
-        roleTitle: preset.roleTitle,
-        avatar: preset.avatar,
-        color: preset.color,
-        systemPrompt: preset.systemPrompt,
-        model: preset.model,
-        active: true,
-      };
+    setConfiguredMembers((prev) => {
+      const existingByRole = new Map(prev.map((m) => [m.role as string, m]));
+      return selectedMemberRoles.map((role) => {
+        if (existingByRole.has(role)) {
+          return existingByRole.get(role)!;
+        }
+        const preset = MEMBER_PRESETS.find((m) => m.role === role)!;
+        return {
+          id: `agent-${role}-${Date.now()}`,
+          type: 'member' as const,
+          name: preset.name,
+          role: preset.role,
+          roleTitle: preset.roleTitle,
+          avatar: preset.avatar,
+          color: preset.color,
+          systemPrompt: preset.systemPrompt,
+          model: preset.model,
+          active: true,
+        };
+      });
     });
-    setConfiguredMembers(updated);
   }, [selectedMemberRoles]);
 
   if (!isOpen) return null;

@@ -45,8 +45,25 @@ export default function App() {
   const [selectedAgentForModal, setSelectedAgentForModal] = useState<AgentConfig | null>(null);
   const [selectedTaskForModal, setSelectedTaskForModal] = useState<Task | null>(null);
 
-  // Activity Logs State
-  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+  // Activity Logs State with LocalStorage Persistence
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>(() => {
+    try {
+      const saved = localStorage.getItem('umkm_activity_logs');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error('Failed to load saved activity logs:', e);
+    }
+    return [];
+  });
+
+  // Save activity logs to local storage when changed
+  useEffect(() => {
+    try {
+      localStorage.setItem('umkm_activity_logs', JSON.stringify(activityLogs));
+    } catch (e) {
+      console.error('Failed to save activity logs:', e);
+    }
+  }, [activityLogs]);
 
   // Save teams to local storage when changed
   useEffect(() => {
