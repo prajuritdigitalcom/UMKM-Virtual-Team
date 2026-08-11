@@ -8,7 +8,13 @@ export type AgentRole =
   | 'social'
   | 'finance'
   | 'developer'
-  | 'cs';
+  | 'cs'
+  | 'legal'
+  | 'tax'
+  | 'ads'
+  | 'ecommerce'
+  | 'hr'
+  | 'admin';
 
 export type AgentStatus = 'IDLE' | 'WORKING' | 'DONE' | 'ERROR' | 'OFFLINE';
 

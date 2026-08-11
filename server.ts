@@ -344,6 +344,14 @@ function auditPlanDependencies(plans: any[], activeMembers: any[]): any[] {
       suggestions = ['content', 'sales'];
     } else if (role === 'seo') {
       suggestions = ['research', 'content'];
+    } else if (role === 'tax') {
+      suggestions = ['finance', 'legal'];
+    } else if (role === 'ads') {
+      suggestions = ['marketing', 'research', 'finance'];
+    } else if (role === 'ecommerce') {
+      suggestions = ['sales', 'content', 'research'];
+    } else if (role === 'hr') {
+      suggestions = ['finance'];
     }
 
     const relevantSuggestions = suggestions.filter((s) =>
