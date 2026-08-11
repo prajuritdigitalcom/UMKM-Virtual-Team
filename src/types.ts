@@ -18,6 +18,21 @@ export type AgentRole =
 
 export type AgentStatus = 'IDLE' | 'WORKING' | 'DONE' | 'ERROR' | 'OFFLINE';
 
+// 'inline'  -> gambar & PDF, dikirim sebagai base64 langsung ke Gemini (dibaca native, termasuk isi visualnya)
+// 'text'    -> Word/Excel/CSV/TXT, isinya sudah diekstrak jadi teks polos di browser sebelum dikirim
+export type AttachmentKind = 'inline' | 'text';
+
+export interface Attachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  kind: AttachmentKind;
+  data?: string; // base64 (tanpa prefix data:...;base64,) — hanya untuk kind 'inline'
+  textContent?: string; // hasil ekstraksi teks — hanya untuk kind 'text'
+  previewUrl?: string; // data URL untuk thumbnail gambar di UI (tidak dikirim ke server)
+}
+
 export interface AgentConfig {
   id: string;
   type: 'boss' | 'member';
@@ -89,6 +104,9 @@ export interface Job {
   finalSynthesis: string | null;
   createdAt: string;
   completedAt?: string;
+  // Hanya menyimpan metadata ringan (nama & ukuran) untuk ditampilkan di riwayat,
+  // BUKAN data base64/teks lengkap — supaya localStorage tidak membengkak.
+  attachmentSummaries?: { name: string; size: number }[];
 }
 
 export interface ActivityLog {

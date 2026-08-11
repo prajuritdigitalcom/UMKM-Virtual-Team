@@ -21,15 +21,30 @@ import {
   Lightbulb,
   Bot,
   Activity,
-  OctagonX
+  OctagonX,
+  Paperclip,
+  X,
+  Image as ImageIcon,
+  File as FileIcon,
+  Loader2,
 } from 'lucide-react';
-import { AgentConfig, Job, Task, Team, ActivityLog } from '../../types';
+import { AgentConfig, Attachment, Job, Task, Team, ActivityLog } from '../../types';
 import {
   exportToTxt,
   exportToCsv,
   exportToDoc,
   exportToPdf,
 } from '../../utils/exportHelpers';
+import {
+  processFile,
+  formatFileSize,
+  toAttachmentPayload,
+  MAX_ATTACHMENTS,
+  MAX_FILE_SIZE_BYTES,
+  MAX_TOTAL_SIZE_BYTES,
+  ACCEPTED_FILE_EXTENSIONS,
+  ACCEPTED_FILE_LABEL,
+} from '../../utils/attachmentHelpers';
 
 interface ControlRoomProps {
   team: Team;
@@ -54,6 +69,13 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState<'synthesis' | 'agent_results'>('synthesis');
   const [selectedAgentResultId, setSelectedAgentResultId] = useState<string | null>(null);
+
+  // Lampiran File (gambar, PDF, Word, Excel, CSV, TXT)
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
 
   // Load saved currentJob for active team from localStorage
   React.useEffect(() => {
@@ -198,8 +220,14 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
     const textToRun = customInstruction || instruction;
     if (!textToRun.trim() || isExecuting) return;
 
+    // Ambil snapshot lampiran saat ini untuk dikirim ke backend, lalu bersihkan area input
+    const attachmentsToSend = toAttachmentPayload(attachments);
+    const attachmentSummaries = attachments.map((a) => ({ name: a.name, size: a.size }));
+
     setIsExecuting(true);
     setInstruction('');
+    setAttachments([]);
+    setAttachmentError(null);
 
     isStoppedRef.current = false;
     const controller = new AbortController();
@@ -237,6 +265,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
           boss: team.boss,
           activeMembers: activeMembers,
           instruction: textToRun,
+          attachments: attachmentsToSend,
         }),
       });
 
@@ -304,6 +333,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
         tasks: initialTasks,
         finalSynthesis: null,
         createdAt: new Date().toISOString(),
+        attachmentSummaries: attachmentSummaries.length > 0 ? attachmentSummaries : undefined,
       };
 
       setCurrentJob(newJob);
@@ -435,6 +465,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
                     businessContext: team.businessContext,
                     globalInstruction: textToRun,
                     previousResults: prevResults,
+                    attachments: attachmentsToSend,
                   }),
                 });
 
@@ -628,6 +659,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
         finalSynthesis: synthData.finalSynthesis,
         createdAt: newJob.createdAt,
         completedAt: new Date().toISOString(),
+        attachmentSummaries: newJob.attachmentSummaries,
       });
     } catch (err: any) {
       if (err.name === 'AbortError' || isStoppedRef.current) {
@@ -650,6 +682,91 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
       setIsExecuting(false);
       abortControllerRef.current = null;
     }
+  };
+
+  // Tambahkan file baru ke daftar lampiran (dipakai oleh input file & drag-and-drop)
+  const addFiles = async (fileList: FileList | File[]) => {
+    const incoming = Array.from(fileList);
+    if (incoming.length === 0) return;
+
+    setAttachmentError(null);
+
+    const currentTotalSize = attachments.reduce((sum, a) => sum + a.size, 0);
+    const incomingTotalSize = incoming.reduce((sum, f) => sum + f.size, 0);
+
+    if (attachments.length + incoming.length > MAX_ATTACHMENTS) {
+      setAttachmentError(`Maksimal ${MAX_ATTACHMENTS} file per instruksi. Hapus salah satu lampiran dulu.`);
+      return;
+    }
+
+    if (currentTotalSize + incomingTotalSize > MAX_TOTAL_SIZE_BYTES) {
+      setAttachmentError(
+        `Total ukuran lampiran melebihi batas ${MAX_TOTAL_SIZE_BYTES / 1024 / 1024}MB. Kurangi jumlah/ukuran file.`
+      );
+      return;
+    }
+
+    setIsProcessingFiles(true);
+    const newAttachments: Attachment[] = [];
+    const errors: string[] = [];
+
+    for (const file of incoming) {
+      try {
+        const processed = await processFile(file);
+        newAttachments.push(processed);
+      } catch (err: any) {
+        errors.push(err.message || `Gagal memproses file "${file.name}"`);
+      }
+    }
+
+    if (newAttachments.length > 0) {
+      setAttachments((prev) => [...prev, ...newAttachments]);
+    }
+    if (errors.length > 0) {
+      setAttachmentError(errors.join(' '));
+    }
+    setIsProcessingFiles(false);
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      addFiles(e.target.files);
+    }
+    // reset agar file yang sama bisa dipilih ulang setelah dihapus
+    e.target.value = '';
+  };
+
+  const handleRemoveAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    setAttachmentError(null);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!isExecuting) setIsDraggingFile(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingFile(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingFile(false);
+    if (isExecuting) return;
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      addFiles(e.dataTransfer.files);
+    }
+  };
+
+  const getAttachmentIcon = (att: Attachment) => {
+    if (att.mimeType.startsWith('image/')) return <ImageIcon className="w-4 h-4 text-indigo-300" />;
+    if (att.mimeType === 'application/pdf') return <FileText className="w-4 h-4 text-rose-300" />;
+    if (att.mimeType.includes('spreadsheet') || att.mimeType.includes('excel') || att.mimeType === 'text/csv')
+      return <FileSpreadsheet className="w-4 h-4 text-emerald-300" />;
+    if (att.mimeType.includes('word')) return <FileText className="w-4 h-4 text-blue-300" />;
+    return <FileIcon className="w-4 h-4 text-slate-300" />;
   };
 
   // Copy Synthesis
@@ -852,13 +969,104 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
 
             {/* Input Text Area & Actions */}
             <div className="space-y-3">
-              <textarea
-                rows={3}
-                value={instruction}
-                onChange={(e) => setInstruction(e.target.value)}
-                placeholder="Ketik instruksi bisnis UMKM Anda di sini... (Contoh: Tolong buatkan strategi promosi produk sambal kemasan untuk bulan Ramadan, lengkap dengan riset harga kompetitor dan skrip penawaran WA)"
-                className="w-full bg-slate-950/80 border border-slate-700/90 rounded-2xl p-4 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-[#fe4c6f] focus:ring-1 focus:ring-[#fe4c6f] resize-none"
-              />
+              <div
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`relative rounded-2xl transition-all ${
+                  isDraggingFile ? 'ring-2 ring-[#fe4c6f] ring-offset-2 ring-offset-slate-900' : ''
+                }`}
+              >
+                <textarea
+                  rows={3}
+                  value={instruction}
+                  onChange={(e) => setInstruction(e.target.value)}
+                  placeholder="Ketik instruksi bisnis UMKM Anda di sini... (Contoh: Tolong buatkan strategi promosi produk sambal kemasan untuk bulan Ramadan, lengkap dengan riset harga kompetitor dan skrip penawaran WA)"
+                  className="w-full bg-slate-950/80 border border-slate-700/90 rounded-2xl p-4 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-[#fe4c6f] focus:ring-1 focus:ring-[#fe4c6f] resize-none"
+                />
+                {isDraggingFile && (
+                  <div className="absolute inset-0 rounded-2xl bg-[#fe4c6f]/10 border-2 border-dashed border-[#fe4c6f] flex items-center justify-center pointer-events-none">
+                    <span className="text-xs font-bold text-[#fe4c6f] bg-slate-950/90 px-3 py-1.5 rounded-lg">
+                      Lepaskan file di sini untuk melampirkan
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Attach File Button + Hidden Input */}
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept={ACCEPTED_FILE_EXTENSIONS}
+                  onChange={handleFileInputChange}
+                  className="hidden"
+                  disabled={isExecuting}
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isExecuting || attachments.length >= MAX_ATTACHMENTS}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 border border-slate-700/80 text-slate-300 hover:text-slate-100 text-xs font-semibold flex items-center gap-1.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={`Lampirkan file: ${ACCEPTED_FILE_LABEL}`}
+                >
+                  <Paperclip className="w-3.5 h-3.5" />
+                  Lampirkan File
+                </button>
+                {isProcessingFiles && (
+                  <span className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Memproses file...
+                  </span>
+                )}
+                <span className="text-[10px] text-slate-500">
+                  Maks {MAX_ATTACHMENTS} file, {MAX_FILE_SIZE_BYTES / 1024 / 1024}MB/file
+                </span>
+              </div>
+
+              {/* Attachment Error */}
+              {attachmentError && (
+                <div className="flex items-start gap-2 text-[11px] text-rose-300 bg-rose-950/30 border border-rose-500/30 rounded-xl px-3 py-2">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>{attachmentError}</span>
+                </div>
+              )}
+
+              {/* Attached File Chips */}
+              {attachments.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {attachments.map((att) => (
+                    <div
+                      key={att.id}
+                      className="flex items-center gap-2 bg-slate-800/80 border border-slate-700/80 rounded-xl pl-2 pr-1.5 py-1.5 max-w-[220px]"
+                    >
+                      {att.previewUrl ? (
+                        <img
+                          src={att.previewUrl}
+                          alt={att.name}
+                          className="w-6 h-6 rounded object-cover shrink-0"
+                        />
+                      ) : (
+                        <span className="shrink-0">{getAttachmentIcon(att)}</span>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-semibold text-slate-200 truncate">{att.name}</p>
+                        <p className="text-[9.5px] text-slate-500">{formatFileSize(att.size)}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveAttachment(att.id)}
+                        disabled={isExecuting}
+                        className="shrink-0 p-1 rounded-lg hover:bg-slate-700 text-slate-400 hover:text-rose-300 transition-colors disabled:opacity-40"
+                        title="Hapus lampiran"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                 <span className="text-xs text-slate-400 flex items-center gap-1.5">
@@ -868,7 +1076,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
                       <span className="text-emerald-400 font-semibold">Tim AI sedang mengeksekusi tugas...</span>
                     </>
                   ) : (
-                    <span>Ketik instruksi atau pilih salah satu instruksi cepat di atas</span>
+                    <span>Ketik instruksi, lampirkan file jika perlu, atau pilih instruksi cepat di atas</span>
                   )}
                 </span>
 
@@ -895,9 +1103,9 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
                   {/* Jalankan Tim Button */}
                   <button
                     onClick={() => handleRunJob()}
-                    disabled={!instruction.trim() || isExecuting}
+                    disabled={!instruction.trim() || isExecuting || isProcessingFiles}
                     className={`px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-2 transition-all shadow-lg ${
-                      !instruction.trim() || isExecuting
+                      !instruction.trim() || isExecuting || isProcessingFiles
                         ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
                         : 'bg-gradient-to-r from-[#fe4c6f] to-rose-600 hover:opacity-90 shadow-[#fe4c6f]/25 active:scale-95'
                     }`}
@@ -1015,6 +1223,13 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
               <h3 className="text-base font-bold text-slate-100">
                 "{currentJob.instruction}"
               </h3>
+              {currentJob.attachmentSummaries && currentJob.attachmentSummaries.length > 0 && (
+                <p className="text-[11px] text-slate-400 mt-1 flex items-center gap-1.5">
+                  <Paperclip className="w-3 h-3 text-slate-500" />
+                  {currentJob.attachmentSummaries.length} file dilampirkan:{' '}
+                  {currentJob.attachmentSummaries.map((a) => a.name).join(', ')}
+                </p>
+              )}
             </div>
 
             <div className="flex items-center gap-3">

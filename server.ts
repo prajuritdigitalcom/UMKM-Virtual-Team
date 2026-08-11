@@ -6,7 +6,46 @@ import { createServer as createViteServer } from 'vite';
 const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: '10mb' }));
+// Limit dinaikkan untuk menampung lampiran file (gambar/PDF dikirim sebagai base64 dari frontend).
+// Batas per-file & total sudah divalidasi di frontend (lihat src/utils/attachmentHelpers.ts),
+// nilai di sini hanya jaring pengaman tambahan di level HTTP body parser.
+app.use(express.json({ limit: '30mb' }));
+
+// ----------------------------------------------------
+// LAMPIRAN FILE: konversi payload attachment dari frontend menjadi
+// content parts yang dipahami Gemini API.
+// - kind 'inline' (gambar/PDF) -> dikirim sebagai inlineData, dibaca native oleh Gemini.
+// - kind 'text' (Word/Excel/CSV/TXT, sudah diekstrak di browser) -> disisipkan sebagai teks biasa.
+// ----------------------------------------------------
+interface IncomingAttachment {
+  name: string;
+  mimeType: string;
+  kind: 'inline' | 'text';
+  data?: string;
+  textContent?: string;
+}
+
+function buildAttachmentParts(attachments?: IncomingAttachment[]): any[] {
+  if (!attachments || attachments.length === 0) return [];
+  const parts: any[] = [];
+  for (const att of attachments) {
+    if (!att) continue;
+    if (att.kind === 'inline' && att.data) {
+      parts.push({ inlineData: { mimeType: att.mimeType, data: att.data } });
+    } else if (att.kind === 'text' && att.textContent) {
+      parts.push({
+        text: `\n--- LAMPIRAN FILE DARI PENGGUNA: ${att.name} ---\n${att.textContent}\n--- AKHIR LAMPIRAN: ${att.name} ---\n`,
+      });
+    }
+  }
+  return parts;
+}
+
+function describeAttachments(attachments?: IncomingAttachment[]): string {
+  if (!attachments || attachments.length === 0) return '';
+  const names = attachments.map((a) => a.name).join(', ');
+  return `\nPengguna melampirkan ${attachments.length} file (${names}). Gunakan isinya sebagai konteks/data pendukung yang relevan.\n`;
+}
 
 // ----------------------------------------------------
 // RATE LIMITER MIDDLEWARE (PROTECT API QUOTA)
@@ -203,7 +242,14 @@ app.post('/api/test-keys', async (req, res) => {
 // ----------------------------------------------------
 app.post('/api/boss/plan', async (req, res) => {
   try {
-    const { teamName, businessContext, boss, activeMembers, instruction } = req.body;
+    const { teamName, businessContext, boss, activeMembers, instruction, attachments } = req.body as {
+      teamName: string;
+      businessContext?: string;
+      boss: any;
+      activeMembers: any[];
+      instruction: string;
+      attachments?: IncomingAttachment[];
+    };
 
     if (!instruction || !activeMembers || activeMembers.length === 0) {
       return res.status(400).json({ error: 'Instruction and active members are required' });
@@ -222,6 +268,7 @@ ${activeAgentsList}
 
 Instruksi Pengguna:
 "${instruction}"
+${describeAttachments(attachments)}
 
 Tugasmu:
 1. Pahami instruksi pengguna secara mendalam untuk skala bisnis UMKM.
@@ -240,9 +287,13 @@ Setiap elemen array mewakili sub-tugas untuk 1 agent:
 - reasoning: alasan singkat pendelegasian ini
 `;
 
+    const planContents = [
+      { role: 'user', parts: [{ text: promptText }, ...buildAttachmentParts(attachments)] },
+    ];
+
     const { response, keyUsedSuffix, attemptsLog } = await generateWithKeyFailover(req, {
       model: boss.model || 'gemini-3.6-flash',
-      contents: promptText,
+      contents: planContents,
       config: {
         systemInstruction: boss.systemPrompt,
         responseMimeType: 'application/json',
@@ -424,7 +475,15 @@ function appendDeduplicatedChunk(accumulated: string, chunk: string): string {
 // ----------------------------------------------------
 app.post('/api/agent/execute', async (req, res) => {
   try {
-    const { agent, instruction, businessContext, globalInstruction, previousResults } = req.body;
+    const { agent, instruction, businessContext, globalInstruction, previousResults, attachments } =
+      req.body as {
+        agent: any;
+        instruction: string;
+        businessContext?: string;
+        globalInstruction?: string;
+        previousResults?: any[];
+        attachments?: IncomingAttachment[];
+      };
 
     if (!agent || !instruction) {
       return res.status(400).json({ error: 'Agent and instruction are required' });
@@ -452,6 +511,7 @@ ${globalInstruction ? `Instruksi Utama Pengguna: "${globalInstruction}"` : ''}
 Tugas Spesifik untukmu dari Boss/Coordinator:
 "${instruction}"
 ${contextSection}
+${describeAttachments(attachments)}
 
 Ingat Standar Kualitas "Super Strong":
 - Berikan output yang langsung dapat dieksekusi tanpa perlu diterjemahkan ulang oleh pemilik UMKM solo.
@@ -464,7 +524,9 @@ Ingat Standar Kualitas "Super Strong":
     let accumulatedResult = '';
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
-    let contentsHistory: any[] = [{ role: 'user', parts: [{ text: promptText }] }];
+    let contentsHistory: any[] = [
+      { role: 'user', parts: [{ text: promptText }, ...buildAttachmentParts(attachments)] },
+    ];
     let isFinished = false;
     let attempts = 0;
     const maxContinuations = 2; // Reduced for specialist agents to optimize token usage
