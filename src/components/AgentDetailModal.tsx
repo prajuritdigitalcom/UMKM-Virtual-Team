@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { X, Bot, Copy, Download, Check, Sparkles, Sliders, FileText, FileSpreadsheet } from 'lucide-react';
 import { AgentConfig, Task } from '../types';
 import { exportToTxt, exportToDoc, exportToPdf, exportToCsv } from '../utils/exportHelpers';
@@ -101,6 +102,7 @@ export const AgentDetailModal: React.FC<AgentDetailModalProps> = ({
 
               <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-xl text-xs text-slate-200 leading-relaxed font-sans max-h-80 overflow-y-auto">
                 <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
                   components={{
                     h1: ({ children }) => <h1 className="text-base font-bold text-indigo-300 mt-3 mb-1.5 border-b border-slate-800 pb-1">{children}</h1>,
                     h2: ({ children }) => <h2 className="text-sm font-bold text-indigo-400 mt-2.5 mb-1">{children}</h2>,
@@ -112,6 +114,16 @@ export const AgentDetailModal: React.FC<AgentDetailModalProps> = ({
                     blockquote: ({ children }) => <blockquote className="border-l-2 border-indigo-500 pl-2 my-1 text-slate-400 italic bg-slate-900/50 py-1 rounded-r">{children}</blockquote>,
                     strong: ({ children }) => <strong className="font-bold text-slate-100">{children}</strong>,
                     code: ({ children }) => <code className="bg-slate-800 text-indigo-300 px-1 py-0.5 rounded text-[11px] font-mono">{children}</code>,
+                    table: ({ children }) => (
+                      <div className="overflow-x-auto my-3 rounded-lg border border-slate-800">
+                        <table className="w-full text-left text-xs border-collapse">{children}</table>
+                      </div>
+                    ),
+                    thead: ({ children }) => <thead className="bg-slate-800/80 text-indigo-300 font-semibold">{children}</thead>,
+                    tbody: ({ children }) => <tbody className="divide-y divide-slate-800/80 text-slate-300">{children}</tbody>,
+                    tr: ({ children }) => <tr className="hover:bg-slate-800/30 transition-colors">{children}</tr>,
+                    th: ({ children }) => <th className="p-2 border-b border-slate-800 font-semibold">{children}</th>,
+                    td: ({ children }) => <td className="p-2 border-b border-slate-800/60">{children}</td>,
                   }}
                 >
                   {latestTask.result}

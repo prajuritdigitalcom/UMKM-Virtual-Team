@@ -99,10 +99,20 @@ export const ActivityLogsModal: React.FC<ActivityLogsModalProps> = ({
                 <div className="flex-1">
                   <div className="flex items-center justify-between gap-2 mb-1">
                     <span className="font-bold text-slate-300 flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          log.eventType === 'PLAN_WARNING' ? 'bg-amber-400' : 'bg-emerald-400'
+                        }`}
+                      />
                       {log.agentName}
                     </span>
-                    <span className="text-[9px] uppercase px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                    <span
+                      className={`text-[9px] uppercase px-2 py-0.5 rounded border ${
+                        log.eventType === 'PLAN_WARNING'
+                          ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                          : 'bg-slate-800 text-slate-400 border-slate-700'
+                      }`}
+                    >
                       {log.eventType}
                     </span>
                   </div>

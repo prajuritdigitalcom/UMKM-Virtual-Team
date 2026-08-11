@@ -69,6 +69,55 @@ export function markdownToCleanHtml(markdown: string): string {
       continue;
     }
 
+    // Markdown Table block detection
+    if (line.startsWith('|')) {
+      closeListIfNeeded();
+      const tableLines: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        tableLines.push(lines[i].trim());
+        i++;
+      }
+      i--; // rewind one since loop will increment
+
+      if (tableLines.length > 0) {
+        html += '<table style="width:100%;border-collapse:collapse;margin:14px 0;border:1px solid #cbd5e1;font-size:13px;">\n';
+        let isHeader = true;
+
+        for (let t = 0; t < tableLines.length; t++) {
+          const rowLine = tableLines[t];
+          // Skip separator line e.g. |---|---|
+          if (/^\|[\s\-:|]+\|$/.test(rowLine)) {
+            continue;
+          }
+
+          const cells = rowLine
+            .split('|')
+            .slice(1, -1)
+            .map((c) => parseInline(c.trim()));
+
+          if (isHeader) {
+            html += '  <thead>\n    <tr style="background:#f1f5f9;">\n';
+            cells.forEach((cell) => {
+              html += `      <th style="border:1px solid #cbd5e1;padding:8px 10px;font-weight:bold;color:#1e293b;text-align:left;">${cell}</th>\n`;
+            });
+            html += '    </tr>\n  </thead>\n  <tbody>\n';
+            isHeader = false;
+          } else {
+            html += '    <tr style="border-bottom:1px solid #e2e8f0;">\n';
+            cells.forEach((cell) => {
+              html += `      <td style="border:1px solid #cbd5e1;padding:7px 10px;color:#334155;">${cell}</td>\n`;
+            });
+            html += '    </tr>\n';
+          }
+        }
+        if (!isHeader) {
+          html += '  </tbody>\n';
+        }
+        html += '</table>\n';
+        continue;
+      }
+    }
+
     // Headings
     if (line.startsWith('# ')) {
       closeListIfNeeded();
@@ -152,10 +201,38 @@ export function exportToTxt(title: string, content: string) {
 export function exportToCsv(title: string, content: string) {
   const cleanTitle = stripEmojis(title);
   const sanitizedContent = stripEmojis(content);
-  const cleanText = stripMarkdownSyntax(sanitizedContent);
 
-  const lines = cleanText.split('\n');
-  const csvContent = lines.map((line) => `"${line.replace(/"/g, '""')}"`).join('\n');
+  const lines = sanitizedContent.split('\n');
+  const csvRows: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    // Parse Markdown tables into proper multi-column CSV
+    if (line.startsWith('|')) {
+      // Skip separator line |---|
+      if (/^\|[\s\-:|]+\|$/.test(line)) {
+        continue;
+      }
+      const cells = line
+        .split('|')
+        .slice(1, -1)
+        .map((c) => {
+          const cleanCell = stripMarkdownSyntax(c.trim());
+          return `"${cleanCell.replace(/"/g, '""')}"`;
+        });
+
+      csvRows.push(cells.join(','));
+      continue;
+    }
+
+    // Regular line as single column
+    const cleanLine = stripMarkdownSyntax(line);
+    csvRows.push(`"${cleanLine.replace(/"/g, '""')}"`);
+  }
+
+  const csvContent = csvRows.join('\n');
   const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -180,6 +257,9 @@ export function exportToDoc(title: string, content: string) {
         h1.title { color: #1e3a8a; font-size: 24px; margin-bottom: 6px; font-weight: bold; }
         .subtitle { font-size: 11px; color: #64748b; font-style: italic; margin-bottom: 20px; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; }
         .footer { margin-top: 40px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 12px; text-align: center; }
+        table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+        th, td { border: 1px solid #cbd5e1; padding: 8px 10px; text-align: left; }
+        th { background-color: #f1f5f9; font-weight: bold; }
       </style>
     </head>
     <body>
@@ -246,6 +326,70 @@ export function exportToPdf(title: string, content: string) {
       if (y > pageHeight - 20) {
         doc.addPage();
         y = 20;
+      }
+
+      // Markdown Table
+      if (line.startsWith('|')) {
+        const tableLines: string[] = [];
+        while (i < rawLines.length && rawLines[i].trim().startsWith('|')) {
+          tableLines.push(rawLines[i].trim());
+          i++;
+        }
+        i--; // rewind one
+
+        if (tableLines.length > 0) {
+          const rows: string[][] = [];
+          for (const tblLine of tableLines) {
+            if (/^\|[\s\-:|]+\|$/.test(tblLine)) continue; // skip separator line
+            const cells = tblLine
+              .split('|')
+              .slice(1, -1)
+              .map((c) => stripMarkdownSyntax(c.trim()));
+            rows.push(cells);
+          }
+
+          if (rows.length > 0) {
+            const numCols = Math.max(...rows.map((r) => r.length));
+            const colWidth = maxWidth / Math.max(numCols, 1);
+
+            rows.forEach((row, rowIndex) => {
+              if (y > pageHeight - 25) {
+                doc.addPage();
+                y = 20;
+              }
+
+              const isHeader = rowIndex === 0;
+
+              if (isHeader) {
+                doc.setFillColor(241, 245, 249); // light bg for header
+                doc.rect(margin, y - 4, maxWidth, 8, 'F');
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(9);
+                doc.setTextColor(30, 58, 138);
+              } else {
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(8.5);
+                doc.setTextColor(30, 41, 59);
+              }
+
+              row.forEach((cellText, colIndex) => {
+                const cellX = margin + colIndex * colWidth + 2;
+                const wrapped = doc.splitTextToSize(cellText, colWidth - 4);
+                doc.text(wrapped[0] || '', cellX, y);
+              });
+
+              // Bottom border line for row
+              doc.setDrawColor(226, 232, 240);
+              doc.setLineWidth(0.2);
+              doc.line(margin, y + 2, margin + maxWidth, y + 2);
+
+              y += isHeader ? 8 : 7;
+            });
+
+            y += 4;
+            continue;
+          }
+        }
       }
 
       // Heading 1 (# )
@@ -331,4 +475,3 @@ export function exportToPdf(title: string, content: string) {
     exportToTxt(title, content);
   }
 }
-

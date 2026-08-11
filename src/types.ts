@@ -94,6 +94,7 @@ export interface ActivityLog {
     | 'JOB_CREATED'
     | 'PLANNING_STARTED'
     | 'PLANNING_COMPLETED'
+    | 'PLAN_WARNING'
     | 'TASK_STARTED'
     | 'TASK_COMPLETED'
     | 'TASK_RETRY'

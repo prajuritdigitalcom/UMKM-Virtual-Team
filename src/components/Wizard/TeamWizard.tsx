@@ -76,8 +76,8 @@ export const TeamWizard: React.FC<TeamWizardProps> = ({
     if (selectedMemberRoles.includes(role)) {
       setSelectedMemberRoles(selectedMemberRoles.filter((r) => r !== role));
     } else {
-      // Enforce MVP constraint: max 3 members
-      if (selectedMemberRoles.length >= 3) {
+      // Enforce constraint: max 7 members
+      if (selectedMemberRoles.length >= 7) {
         return; // UI limit reached
       }
       setSelectedMemberRoles([...selectedMemberRoles, role]);
@@ -240,7 +240,7 @@ export const TeamWizard: React.FC<TeamWizardProps> = ({
             </div>
           )}
 
-          {/* STEP 3: Select Members (MVP limit: max 3 active members) */}
+          {/* STEP 3: Select Members (limit: max 7 active members) */}
           {step === 3 && (
             <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-200">
               <div className="flex items-center justify-between">
@@ -250,25 +250,25 @@ export const TeamWizard: React.FC<TeamWizardProps> = ({
                     Pilih Anggota Tim AI Spesialis
                   </div>
                   <p className="text-xs text-slate-400 mt-1">
-                    Pilih hingga <span className="font-bold text-indigo-300">maksimal 3 agent</span> (Batas MVP) agar eksekusi fokus dan cepat.
+                    Pilih hingga <span className="font-bold text-indigo-300">maksimal 7 agent</span> agar eksekusi komprehensif, fokus, dan cepat.
                   </p>
                 </div>
                 <div className="px-3 py-1 bg-slate-800 border border-slate-700 rounded-full text-xs font-semibold text-indigo-300">
-                  {selectedMemberRoles.length} / 3 Terpilih
+                  {selectedMemberRoles.length} / 7 Terpilih
                 </div>
               </div>
 
-              {selectedMemberRoles.length >= 3 && (
+              {selectedMemberRoles.length >= 7 && (
                 <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center gap-2 text-xs text-amber-300">
                   <AlertCircle className="w-4 h-4 shrink-0" />
-                  Batas MVP maksimal 3 agent aktif tercapai. Uncheck agent untuk mengganti pilihan.
+                  Batas maksimal 7 agent aktif tercapai. Uncheck agent untuk mengganti pilihan.
                 </div>
               )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                 {MEMBER_PRESETS.map((m) => {
                   const isSelected = selectedMemberRoles.includes(m.role);
-                  const isLimitReached = !isSelected && selectedMemberRoles.length >= 3;
+                  const isLimitReached = !isSelected && selectedMemberRoles.length >= 7;
 
                   return (
                     <div
@@ -471,7 +471,7 @@ export const TeamWizard: React.FC<TeamWizardProps> = ({
             <button
               onClick={() => setStep(step + 1)}
               disabled={step === 3 && selectedMemberRoles.length === 0}
-              className={`px-5 py-2 text-xs font-semibold rounded-xl flex items-center gap-1.5 text-white bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-600/20 transition-all ${
+              className={`px-5 py-2 text-xs font-semibold rounded-xl flex items-center gap-1.5 text-white bg-[#fe4c6f] hover:bg-[#e03f5f] shadow-lg shadow-[#fe4c6f]/20 transition-all ${
                 step === 3 && selectedMemberRoles.length === 0
                   ? 'opacity-50 cursor-not-allowed'
                   : ''
@@ -483,7 +483,7 @@ export const TeamWizard: React.FC<TeamWizardProps> = ({
           ) : (
             <button
               onClick={handleFinish}
-              className="px-6 py-2.5 text-xs font-bold rounded-xl flex items-center gap-2 text-white bg-gradient-to-r from-amber-500 via-indigo-600 to-purple-600 hover:opacity-90 shadow-xl shadow-indigo-500/25 transition-all active:scale-[0.98]"
+              className="px-6 py-2.5 text-xs font-bold rounded-xl flex items-center gap-2 text-white bg-gradient-to-r from-amber-500 via-[#fe4c6f] to-rose-600 hover:opacity-90 shadow-xl shadow-[#fe4c6f]/25 transition-all active:scale-[0.98]"
             >
               <CheckCircle2 className="w-4 h-4" />
               Luncurkan Tim AI Sekarang

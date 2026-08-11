@@ -12,21 +12,145 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
-// Helper to get GoogleGenAI client lazily
-function getGenAI() {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY environment variable is not set in Secrets');
+// ----------------------------------------------------
+// MULTI-KEY ROLLING & FAILOVER LOGIC
+// ----------------------------------------------------
+let keyRotationCounter = 0;
+const keyCooldowns = new Map<string, number>();
+
+function getAvailableKeys(req: express.Request): string[] {
+  const customKeyHeader = req.headers['x-gemini-api-key'];
+  if (customKeyHeader) {
+    const raw = Array.isArray(customKeyHeader) ? customKeyHeader[0] : customKeyHeader;
+    const keys = raw.split(/[\n,]+/).map((k) => k.trim()).filter(Boolean);
+    if (keys.length > 0) return keys;
   }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+  if (process.env.GEMINI_API_KEY) return [process.env.GEMINI_API_KEY];
+  return [];
 }
+
+function isKeyRelatedError(message: string): boolean {
+  return /api key not valid|permission denied|unauthenticated|quota|429|rate limit|resource_exhausted|invalid_argument.*key/i.test(message || '');
+}
+
+interface FailoverResult {
+  response: any;
+  keyUsedSuffix: string;
+  attemptsLog: string[];
+}
+
+async function generateWithKeyFailover(
+  req: express.Request,
+  params: Parameters<InstanceType<typeof GoogleGenAI>['models']['generateContent']>[0]
+): Promise<FailoverResult> {
+  const keys = getAvailableKeys(req);
+  if (keys.length === 0) {
+    throw new Error('Tidak ada API Key yang tersedia (custom maupun default sistem).');
+  }
+
+  const attemptsLog: string[] = [];
+  let lastError: any = null;
+
+  for (let i = 0; i < keys.length; i++) {
+    const idx = (keyRotationCounter + i) % keys.length;
+    const apiKey = keys[idx];
+    const keySuffix = apiKey.length >= 4 ? apiKey.slice(-4) : apiKey;
+
+    const cooldownUntil = keyCooldowns.get(apiKey) || 0;
+    if (Date.now() < cooldownUntil && keys.length > 1) {
+      attemptsLog.push(`Key ...${keySuffix} dilewati (cooldown 30s)`);
+      continue;
+    }
+
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const response = await ai.models.generateContent(params);
+      keyRotationCounter = (idx + 1) % keys.length;
+      attemptsLog.push(`Key ...${keySuffix} berhasil`);
+      return { response, keyUsedSuffix: keySuffix, attemptsLog };
+    } catch (err: any) {
+      lastError = err;
+      const errMsg = err.message || String(err);
+      attemptsLog.push(`Key ...${keySuffix} gagal: ${errMsg}`);
+
+      const isTransientServerError = /503|502|500|ECONNRESET|ETIMEDOUT|UNAVAILABLE|overloaded/i.test(errMsg);
+      const shouldRotateKey = (isKeyRelatedError(errMsg) || isTransientServerError) && keys.length > 1;
+
+      if (shouldRotateKey) {
+        keyCooldowns.set(apiKey, Date.now() + 30_000);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  // Fallback if all keys were skipped due to active cooldown
+  if (attemptsLog.length > 0 && attemptsLog.every((log) => log.includes('dilewati'))) {
+    const apiKey = keys[keyRotationCounter % keys.length];
+    const keySuffix = apiKey.length >= 4 ? apiKey.slice(-4) : apiKey;
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const response = await ai.models.generateContent(params);
+      return {
+        response,
+        keyUsedSuffix: keySuffix,
+        attemptsLog: [...attemptsLog, `Key ...${keySuffix} dipaksa coba (semua cooldown)`],
+      };
+    } catch (err: any) {
+      lastError = err;
+    }
+  }
+
+  throw new Error(
+    `Semua ${keys.length} API Key gagal digunakan. Error terakhir: ${lastError?.message || 'Unknown error'}`
+  );
+}
+
+// ----------------------------------------------------
+// ENDPOINT: TEST / VALIDATE API KEYS
+// ----------------------------------------------------
+app.post('/api/test-keys', async (req, res) => {
+  try {
+    const { keys } = req.body as { keys: string[] };
+    if (!Array.isArray(keys) || keys.length === 0) {
+      return res.status(400).json({ error: 'Tidak ada API Key untuk diuji' });
+    }
+
+    const results = await Promise.all(
+      keys.map(async (apiKey) => {
+        const trimmed = apiKey.trim();
+        const keySuffix = trimmed.length >= 4 ? trimmed.slice(-4) : trimmed;
+        if (!trimmed) {
+          return { keySuffix: '????', valid: false, error: 'Key kosong' };
+        }
+        try {
+          const ai = new GoogleGenAI({
+            apiKey: trimmed,
+            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+          });
+          await ai.models.generateContent({
+            model: 'gemini-3.6-flash',
+            contents: 'Tes koneksi.',
+            config: { maxOutputTokens: 5 },
+          });
+          return { keySuffix, valid: true };
+        } catch (err: any) {
+          return { keySuffix, valid: false, error: err.message || 'Gagal terhubung ke Gemini API' };
+        }
+      })
+    );
+
+    res.json({ results });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Pengujian API Keys gagal' });
+  }
+});
 
 // ----------------------------------------------------
 // 1. BOSS PLANNER ENDPOINT
@@ -39,8 +163,6 @@ app.post('/api/boss/plan', async (req, res) => {
       return res.status(400).json({ error: 'Instruction and active members are required' });
     }
 
-    const ai = getGenAI();
-
     const activeAgentsList = activeMembers
       .map((m: any) => `- ID: ${m.id} | Nama: ${m.name} | Role: ${m.role} (${m.roleTitle})`)
       .join('\n');
@@ -49,7 +171,7 @@ app.post('/api/boss/plan', async (req, res) => {
 Kamu adalah ${boss.name}, ${boss.roleTitle} untuk tim "${teamName}".
 ${businessContext ? `Konteks Bisnis: ${businessContext}` : ''}
 
-Daftar Agent Spesialis Aktif di timmu saat ini:
+Daftar Agent Spesialis Aktif di timmu saat ini (Total: ${activeMembers.length} agent):
 ${activeAgentsList}
 
 Instruksi Pengguna:
@@ -57,7 +179,7 @@ Instruksi Pengguna:
 
 Tugasmu:
 1. Pahami instruksi pengguna secara mendalam untuk skala bisnis UMKM.
-2. Tentukan agent mana saja yang relevan untuk mengerjakan tugas ini dari daftar agent aktif di atas. (JANGAN memanggil agent yang tidak ada di daftar di atas!).
+2. Pertimbangkan SELURUH ${activeMembers.length} agent aktif di atas satu per satu, lalu tentukan mana yang relevan untuk instruksi ini. (JANGAN memanggil agent yang tidak ada di daftar di atas!). Libatkan SEMUA agent yang relevan meskipun itu berarti lebih dari 3 agent sekaligus — jumlah agent yang dilibatkan HARUS murni mengikuti relevansi terhadap instruksi, BUKAN dibatasi ke angka kecil karena kebiasaan tim lama. Sebaliknya, jangan juga memaksakan agent yang benar-benar tidak relevan hanya supaya semua agent "kebagian" tugas.
 3. Pecah instruksi menjadi sub-tugas spesifik untuk masing-masing agent yang relevan.
 4. Tentukan urutan pengerjaan / ketergantungan (dependency) yang logis. Misal jika Agent A butuh data dari Agent B, maka Agent A memiliki dependsOn: [ID Agent B].
 5. Pastikan TIDAK ADA siklus ketergantungan melingkar (misal A butuh B, B butuh A).
@@ -72,12 +194,16 @@ Setiap elemen array mewakili sub-tugas untuk 1 agent:
 - reasoning: alasan singkat pendelegasian ini
 `;
 
-    const response = await ai.models.generateContent({
+    const { response, keyUsedSuffix, attemptsLog } = await generateWithKeyFailover(req, {
       model: boss.model || 'gemini-3.6-flash',
       contents: promptText,
       config: {
         systemInstruction: boss.systemPrompt,
         responseMimeType: 'application/json',
+        maxOutputTokens: 65536,
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.MEDIUM,
+        },
         responseSchema: {
           type: Type.ARRAY,
           items: {
@@ -93,68 +219,134 @@ Setiap elemen array mewakili sub-tugas untuk 1 agent:
               },
               reasoning: { type: Type.STRING },
             },
-            required: ['agentId', 'agentName', 'role', 'instruction', 'dependsOn'],
+            required: ['agentId', 'agentName', 'role', 'instruction'],
           },
-        },
-        thinkingConfig: {
-          thinkingLevel: ThinkingLevel.HIGH,
         },
       },
     });
 
-    const rawText = response.text || '[]';
-    let plans = JSON.parse(rawText);
+    let plans: any[] = [];
+    try {
+      plans = JSON.parse(response.text || '[]');
+    } catch (e) {
+      console.error('Failed to parse plan JSON:', response.text);
+      return res.status(500).json({ error: 'Boss AI memberikan format respons yang tidak valid.' });
+    }
 
-    // Filter & validate agent IDs
-    const validMemberIds = new Set(activeMembers.map((m: any) => m.id));
-    plans = plans.filter((plan: any) => validMemberIds.has(plan.agentId));
+    // Sanitize and validate agentIds in plans against activeMembers
+    const validMemberIds = new Set(activeMembers.map((m) => m.id));
+    plans = plans.map((p) => {
+      let matchedMember = activeMembers.find((m) => m.id === p.agentId);
+      if (!matchedMember) {
+        // Fallback match by role or agentName
+        matchedMember =
+          activeMembers.find((m) => m.role === p.role) ||
+          activeMembers.find((m) => m.name.toLowerCase() === (p.agentName || '').toLowerCase()) ||
+          activeMembers[0];
+      }
+      return {
+        ...p,
+        agentId: matchedMember ? matchedMember.id : p.agentId,
+        agentName: matchedMember ? matchedMember.name : p.agentName,
+        role: matchedMember ? matchedMember.role : p.role,
+        dependsOn: Array.isArray(p.dependsOn)
+          ? p.dependsOn.filter((depId: string) => validMemberIds.has(depId))
+          : [],
+      };
+    });
 
-    // Validate DAG (Remove circular dependencies)
-    plans = sanitizeDependencies(plans);
-
-    const usage = response.usageMetadata || { promptTokenCount: 150, candidatesTokenCount: 300 };
+    const coverageWarnings = auditAgentCoverage(plans, activeMembers);
+    const dependencyWarnings = auditPlanDependencies(plans, activeMembers);
+    const warnings = [...coverageWarnings, ...dependencyWarnings];
 
     res.json({
-      success: true,
       plans,
-      tokens: {
-        inputTokens: usage.promptTokenCount || 0,
-        outputTokens: usage.candidatesTokenCount || 0,
-      },
+      warnings,
+      keyUsedSuffix,
+      attemptsLog,
     });
   } catch (err: any) {
     console.error('Error in /api/boss/plan:', err);
-    res.status(500).json({ error: err.message || 'Failed to generate plan' });
+    res.status(500).json({ error: err.message || 'Gagal memproses rencana kerja Boss AI' });
   }
 });
 
-// Helper to prevent circular dependencies in task graph (DFS-based multi-node cycle detector)
-function sanitizeDependencies(plans: any[]) {
-  const planMap = new Map(plans.map((p) => [p.agentId, { ...p, dependsOn: [...(p.dependsOn || [])] }]));
+// Coverage audit: tandai agent aktif yang sama sekali tidak disertakan dalam plan
+function auditAgentCoverage(plans: any[], activeMembers: any[]): any[] {
+  const warnings: any[] = [];
+  const usedAgentIds = new Set(plans.map((p) => p.agentId));
 
-  const hasPath = (fromId: string, toId: string, visited = new Set<string>()): boolean => {
-    if (fromId === toId) return true;
-    if (visited.has(fromId)) return false;
-    visited.add(fromId);
-    const node = planMap.get(fromId);
-    if (!node) return false;
-    return (node.dependsOn || []).some((nextId: string) => hasPath(nextId, toId, visited));
-  };
+  activeMembers.forEach((m) => {
+    if (!usedAgentIds.has(m.id)) {
+      warnings.push({
+        agentId: m.id,
+        agentName: m.name,
+        message: `${m.name} (${m.roleTitle}) aktif di tim tapi TIDAK disertakan Boss AI dalam rencana kerja untuk instruksi ini. Jika ini tidak sesuai ekspektasi, coba pertegas instruksi agar mencakup bidang ${m.roleTitle}.`,
+      });
+    }
+  });
 
-  for (const plan of planMap.values()) {
-    plan.dependsOn = (plan.dependsOn || []).filter((depId: string) => {
-      if (!planMap.has(depId)) return false;
-      if (depId === plan.agentId) return false;
-      // If depId has a path back to plan.agentId, adding this edge creates a cycle
-      if (hasPath(depId, plan.agentId)) {
-        console.warn(`Circular dependency detected: ${plan.agentId} -> ${depId}. Breaking edge.`);
-        return false;
-      }
-      return true;
-    });
+  return warnings;
+}
+
+// Dependency audit helper
+function auditPlanDependencies(plans: any[], activeMembers: any[]): any[] {
+  const warnings: any[] = [];
+  const memberRolesMap = new Map<string, string>();
+  activeMembers.forEach((m) => memberRolesMap.set(m.id, m.role));
+
+  for (const plan of plans) {
+    const role = memberRolesMap.get(plan.agentId) || plan.role;
+    const dependsOnList = plan.dependsOn || [];
+    const dependsOnRoles = new Set(dependsOnList.map((id: string) => memberRolesMap.get(id)));
+
+    let suggestions: string[] = [];
+    if (role === 'content' || role === 'social') {
+      suggestions = ['research', 'marketing'];
+    } else if (role === 'sales') {
+      suggestions = ['content', 'research', 'marketing'];
+    } else if (role === 'marketing') {
+      suggestions = ['research'];
+    } else if (role === 'finance') {
+      suggestions = ['sales', 'research'];
+    } else if (role === 'cs') {
+      suggestions = ['content', 'sales'];
+    } else if (role === 'seo') {
+      suggestions = ['research', 'content'];
+    }
+
+    const relevantSuggestions = suggestions.filter((s) =>
+      activeMembers.some((m) => m.role === s) &&
+      plans.some((p) => memberRolesMap.get(p.agentId) === s)
+    );
+
+    const hasRelevantDependency = relevantSuggestions.some((r) => dependsOnRoles.has(r));
+
+    if (relevantSuggestions.length > 0 && !hasRelevantDependency) {
+      warnings.push({
+        agentId: plan.agentId,
+        agentName: plan.agentName,
+        message: `${plan.agentName} (${plan.role}) tidak depend ke agent ${relevantSuggestions.join('/')} yang biasanya jadi sumber brief.`,
+      });
+    }
   }
 
-  return Array.from(planMap.values());
+  return warnings;
+}
+
+// Helper to append continuation chunk without duplicating overlapping text at the seam
+function appendDeduplicatedChunk(accumulated: string, chunk: string): string {
+  if (!accumulated) return chunk;
+  if (!chunk) return accumulated;
+
+  const maxOverlap = Math.min(accumulated.length, chunk.length, 200);
+  for (let len = maxOverlap; len >= 10; len--) {
+    const tail = accumulated.slice(-len);
+    if (chunk.startsWith(tail)) {
+      return accumulated + chunk.slice(len);
+    }
+  }
+  return accumulated + '\n' + chunk;
 }
 
 // ----------------------------------------------------
@@ -167,8 +359,6 @@ app.post('/api/agent/execute', async (req, res) => {
     if (!agent || !instruction) {
       return res.status(400).json({ error: 'Agent and instruction are required' });
     }
-
-    const ai = getGenAI();
 
     let contextSection = '';
     if (previousResults && previousResults.length > 0) {
@@ -206,11 +396,13 @@ Ingat Standar Kualitas "Super Strong":
     let isFinished = false;
     let attempts = 0;
     const maxContinuations = 3;
+    let lastKeyUsedSuffix = '';
+    const allAttemptsLogs: string[] = [];
 
     while (!isFinished && attempts <= maxContinuations) {
       attempts++;
 
-      const response = await ai.models.generateContent({
+      const { response, keyUsedSuffix, attemptsLog } = await generateWithKeyFailover(req, {
         model: agent.model || 'gemini-3.6-flash',
         contents: currentPrompt,
         config: {
@@ -222,8 +414,11 @@ Ingat Standar Kualitas "Super Strong":
         },
       });
 
+      lastKeyUsedSuffix = keyUsedSuffix;
+      allAttemptsLogs.push(...attemptsLog);
+
       const chunk = response.text || '';
-      accumulatedResult += (accumulatedResult ? '\n' : '') + chunk;
+      accumulatedResult = appendDeduplicatedChunk(accumulatedResult, chunk);
 
       const usage = response.usageMetadata || { promptTokenCount: 300, candidatesTokenCount: 600 };
       totalInputTokens += usage.promptTokenCount || 0;
@@ -232,9 +427,8 @@ Ingat Standar Kualitas "Super Strong":
       const candidate = response.candidates?.[0];
       const finishReason = candidate?.finishReason;
 
-      // Check if response was truncated
       if (finishReason === 'MAX_TOKENS') {
-        console.warn(`[Agent ${agent.name}] Response truncated (MAX_TOKENS). Requesting continuation attempt ${attempts}...`);
+        console.warn(`[Agent ${agent.name}] Response truncated (MAX_TOKENS). Continuation attempt ${attempts}...`);
         currentPrompt = `
 Berikut adalah teks yang baru saja kamu hasilkan sebelumnya:
 "${chunk.slice(-500)}"
@@ -255,10 +449,12 @@ Teks sebelumnya terpotong karena batas panjang output. TOLONG LANJUTKAN tulisan 
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
       },
+      keyUsedSuffix: lastKeyUsedSuffix,
+      attemptsLog: allAttemptsLogs,
     });
   } catch (err: any) {
     console.error('Error in /api/agent/execute:', err);
-    res.status(500).json({ error: err.message || 'Agent execution failed' });
+    res.status(500).json({ error: err.message || 'Eksekusi agent gagal' });
   }
 });
 
@@ -272,8 +468,6 @@ app.post('/api/boss/synthesize', async (req, res) => {
     if (!boss || !userInstruction || !taskResults) {
       return res.status(400).json({ error: 'Boss, userInstruction, and taskResults are required' });
     }
-
-    const ai = getGenAI();
 
     const formattedAgentResults = taskResults
       .map(
@@ -318,11 +512,13 @@ Format Laporan Akhir Disarankan:
     let isFinished = false;
     let attempts = 0;
     const maxContinuations = 3;
+    let lastKeyUsedSuffix = '';
+    const allAttemptsLogs: string[] = [];
 
     while (!isFinished && attempts <= maxContinuations) {
       attempts++;
 
-      const response = await ai.models.generateContent({
+      const { response, keyUsedSuffix, attemptsLog } = await generateWithKeyFailover(req, {
         model: boss.model || 'gemini-3.6-flash',
         contents: currentPrompt,
         config: {
@@ -334,8 +530,11 @@ Format Laporan Akhir Disarankan:
         },
       });
 
+      lastKeyUsedSuffix = keyUsedSuffix;
+      allAttemptsLogs.push(...attemptsLog);
+
       const chunk = response.text || '';
-      accumulatedSynthesis += (accumulatedSynthesis ? '\n' : '') + chunk;
+      accumulatedSynthesis = appendDeduplicatedChunk(accumulatedSynthesis, chunk);
 
       const usage = response.usageMetadata || { promptTokenCount: 500, candidatesTokenCount: 1000 };
       totalInputTokens += usage.promptTokenCount || 0;
@@ -345,7 +544,7 @@ Format Laporan Akhir Disarankan:
       const finishReason = candidate?.finishReason;
 
       if (finishReason === 'MAX_TOKENS') {
-        console.warn(`[Boss Synthesis] Response truncated (MAX_TOKENS). Requesting continuation attempt ${attempts}...`);
+        console.warn(`[Boss Synthesis] Response truncated (MAX_TOKENS). Continuation attempt ${attempts}...`);
         currentPrompt = `
 Berikut adalah bagian akhir laporan yang baru saja kamu tulis:
 "${chunk.slice(-500)}"
@@ -366,10 +565,12 @@ Laporan sebelumnya terpotong karena batas panjang output. TOLONG LANJUTKAN lapor
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
       },
+      keyUsedSuffix: lastKeyUsedSuffix,
+      attemptsLog: allAttemptsLogs,
     });
   } catch (err: any) {
     console.error('Error in /api/boss/synthesize:', err);
-    res.status(500).json({ error: err.message || 'Synthesis failed' });
+    res.status(500).json({ error: err.message || 'Sintesis laporan akhir gagal' });
   }
 });
 
@@ -382,7 +583,6 @@ app.post('/api/export', (req, res) => {
     const cleanTitle = (title || 'Laporan_UMKM_Virtual_Team').replace(/[^a-zA-Z0-9_-]/g, '_');
 
     if (format === 'csv') {
-      // Basic CSV export helper
       const lines = content.split('\n');
       const csvContent = lines.map((line: string) => `"${line.replace(/"/g, '""')}"`).join('\n');
       res.setHeader('Content-Type', 'text/csv');
@@ -391,7 +591,6 @@ app.post('/api/export', (req, res) => {
     }
 
     if (format === 'docx' || format === 'doc') {
-      // HTML format formatted for Word opening
       const docHtml = `
         <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
         <head><title>${title}</title>
@@ -416,7 +615,6 @@ app.post('/api/export', (req, res) => {
       return res.send(docHtml);
     }
 
-    // Default TXT
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${cleanTitle}.txt"`);
     return res.send(content);

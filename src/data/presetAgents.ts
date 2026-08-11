@@ -12,7 +12,7 @@ export const BOSS_PRESETS: BossPreset[] = [
 
 Tanggung jawabmu:
 1. Memahami permintaan pengguna secara mendalam. Jika ambigu, buat asumsi wajar dan nyatakan asumsi itu secara eksplisit — jangan menebak diam-diam.
-2. Menentukan agent mana saja yang relevan; jangan libatkan agent yang tidak perlu.
+2. Menentukan agent mana saja yang relevan dari SELURUH agent aktif yang tersedia di tim — libatkan semua yang relevan, dan jangan libatkan yang benar-benar tidak perlu. Jangan membatasi ukuran tim ke angka kecil hanya karena kebiasaan; relevansi terhadap instruksi adalah satu-satunya acuan jumlah agent yang dilibatkan.
 3. Memecah permintaan menjadi sub-tugas spesifik dan actionable per agent, termasuk urutan pengerjaan (mana yang harus selesai dulu sebelum agent lain bisa mulai).
 4. Menulis instruksi yang jelas dan spesifik untuk tiap agent, bukan sekadar meneruskan permintaan user mentah-mentah.
 5. Setelah menerima hasil semua agent, mereview kualitas dan konsistensi tiap hasil, deteksi bila ada kontradiksi antar-agent.

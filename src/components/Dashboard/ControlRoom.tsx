@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Send,
   Play,
@@ -18,7 +19,9 @@ import {
   Eye,
   Building2,
   Lightbulb,
-  Bot
+  Bot,
+  Activity,
+  OctagonX
 } from 'lucide-react';
 import { AgentConfig, Job, Task, Team, ActivityLog } from '../../types';
 import {
@@ -30,14 +33,20 @@ import {
 
 interface ControlRoomProps {
   team: Team;
+  apiKeys?: string[];
   onOpenAgentModal: (agent: AgentConfig, task?: Task | null) => void;
   onAddLog: (log: Omit<ActivityLog, 'id' | 'timestamp'>) => void;
+  logs?: ActivityLog[];
+  onOpenLogs?: () => void;
 }
 
 export const ControlRoom: React.FC<ControlRoomProps> = ({
   team,
+  apiKeys = [],
   onOpenAgentModal,
   onAddLog,
+  logs = [],
+  onOpenLogs,
 }) => {
   const [instruction, setInstruction] = useState('');
   const [currentJob, setCurrentJob] = useState<Job | null>(null);
@@ -89,6 +98,69 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
     return task.status;
   };
 
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isStoppedRef = useRef<boolean>(false);
+
+  // Stop the running job manually
+  const handleStopJob = () => {
+    if (!isExecuting) return;
+    isStoppedRef.current = true;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    setIsExecuting(false);
+    if (currentJob) {
+      setCurrentJob((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          status: 'error',
+          tasks: prev.tasks.map((t) =>
+            t.status === 'IDLE' || t.status === 'WORKING'
+              ? { ...t, status: 'ERROR', errorMessage: 'Dibatalkan secara manual oleh pengguna' }
+              : t
+          ),
+        };
+      });
+      onAddLog({
+        jobId: currentJob.id,
+        agentName: team.boss.name,
+        eventType: 'TASK_ERROR',
+        message: `Proses eksekusi dihentikan secara manual oleh pengguna.`,
+      });
+    }
+  };
+
+  const getRequestHeaders = () => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKeys && apiKeys.length > 0) {
+      headers['x-gemini-api-key'] = apiKeys.join(',');
+    } else {
+      try {
+        const saved = localStorage.getItem('umkm_gemini_api_keys');
+        if (saved) {
+          const keys = JSON.parse(saved);
+          if (Array.isArray(keys) && keys.length > 0) {
+            headers['x-gemini-api-key'] = keys.join(',');
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    return headers;
+  };
+
+  const parseErrorResponse = async (res: Response, fallback: string): Promise<string> => {
+    try {
+      const body = await res.json();
+      if (body?.error) return body.error;
+    } catch {
+      // body bukan JSON atau kosong
+    }
+    return fallback;
+  };
+
   // Run the multi-agent orchestration pipeline
   const handleRunJob = async (customInstruction?: string) => {
     const textToRun = customInstruction || instruction;
@@ -96,6 +168,11 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
 
     setIsExecuting(true);
     setInstruction('');
+
+    isStoppedRef.current = false;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const signal = controller.signal;
 
     const jobId = `job-${Date.now()}`;
 
@@ -120,7 +197,8 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
 
       const planRes = await fetch('/api/boss/plan', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getRequestHeaders(),
+        signal,
         body: JSON.stringify({
           teamName: team.name,
           businessContext: team.businessContext,
@@ -131,18 +209,41 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
       });
 
       if (!planRes.ok) {
-        throw new Error('Gagal menghubungi Boss AI untuk membuat rencana');
+        const errMsg = await parseErrorResponse(planRes, 'Gagal menghubungi Boss AI untuk membuat rencana');
+        throw new Error(errMsg);
       }
 
       const planData = await planRes.json();
       const plans = planData.plans || [];
+      const planKeySuffix = planData.keyUsedSuffix ? ` [Key: ...${planData.keyUsedSuffix}]` : '';
+
+      if (planData.attemptsLog && planData.attemptsLog.length > 1) {
+        onAddLog({
+          jobId,
+          agentName: team.boss.name,
+          eventType: 'PLAN_WARNING',
+          message: `Rotasi Key Boss Planner: ${planData.attemptsLog.join(' → ')}`,
+        });
+      }
 
       onAddLog({
         jobId,
         agentName: team.boss.name,
         eventType: 'PLANNING_COMPLETED',
-        message: `${team.boss.name} berhasil membagi ${plans.length} sub-tugas dengan urutan ketergantungan.`,
+        message: `${team.boss.name} berhasil membagi ${plans.length} sub-tugas dengan urutan ketergantungan.${planKeySuffix}`,
         tokens: planData.tokens,
+      });
+
+      // Soft warning dari sanity-check backend (non-blocking) — eksekusi tetap lanjut
+      const planWarnings: Array<{ agentId: string; agentName: string; message: string }> =
+        planData.warnings || [];
+      planWarnings.forEach((w) => {
+        onAddLog({
+          jobId,
+          agentName: w.agentName,
+          eventType: 'PLAN_WARNING',
+          message: w.message,
+        });
       });
 
       // Construct Initial Job & Tasks
@@ -252,7 +353,26 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
             setCurrentJob((prev) => (prev ? { ...prev, tasks: [...runningTasks] } : null));
 
             const agentObj = team.members.find((m) => m.id === taskToRun.agentId);
-            if (!agentObj) return;
+            if (!agentObj) {
+              runningTasks = runningTasks.map((t) =>
+                t.id === taskToRun.id
+                  ? {
+                      ...t,
+                      status: 'ERROR',
+                      errorMessage: `Agent ID "${taskToRun.agentId}" tidak ditemukan dalam tim.`,
+                    }
+                  : t
+              );
+              onAddLog({
+                jobId,
+                taskId: taskToRun.id,
+                agentName: taskToRun.agentName || 'Unknown Agent',
+                eventType: 'TASK_ERROR',
+                message: `Sub-tugas dibatalkan: Agent ID "${taskToRun.agentId}" tidak ada dalam daftar tim.`,
+              });
+              setCurrentJob((prev) => (prev ? { ...prev, tasks: [...runningTasks] } : null));
+              return;
+            }
 
             onAddLog({
               jobId,
@@ -275,7 +395,8 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
 
                 const execRes = await fetch('/api/agent/execute', {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: getRequestHeaders(),
+                  signal,
                   body: JSON.stringify({
                     agent: agentObj,
                     instruction: taskToRun.instruction,
@@ -286,9 +407,11 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
                 });
 
                 if (!execRes.ok) {
-                  const execErr: any = new Error(
+                  const errMsg = await parseErrorResponse(
+                    execRes,
                     `Execution error for agent ${agentObj.name} (HTTP ${execRes.status})`
                   );
+                  const execErr: any = new Error(errMsg);
                   execErr.status = execRes.status;
                   throw execErr;
                 }
@@ -368,12 +491,24 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
                 status: 'DONE',
               });
 
+              const agentKeySuffix = execData.keyUsedSuffix ? ` [Key: ...${execData.keyUsedSuffix}]` : '';
+
+              if (execData.attemptsLog && execData.attemptsLog.length > 1) {
+                onAddLog({
+                  jobId,
+                  taskId: taskToRun.id,
+                  agentName: agentObj.name,
+                  eventType: 'TASK_RETRY',
+                  message: `Rotasi Key Agent ${agentObj.name}: ${execData.attemptsLog.join(' → ')}`,
+                });
+              }
+
               onAddLog({
                 jobId,
                 taskId: taskToRun.id,
                 agentName: agentObj.name,
                 eventType: 'TASK_COMPLETED',
-                message: `${agentObj.name} telah menyelesaikan sub-tugas dengan sukses.`,
+                message: `${agentObj.name} telah menyelesaikan sub-tugas dengan sukses.${agentKeySuffix}`,
                 tokens: execData.tokens,
               });
             }
@@ -410,7 +545,8 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
 
       const synthRes = await fetch('/api/boss/synthesize', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getRequestHeaders(),
+        signal,
         body: JSON.stringify({
           boss: team.boss,
           teamName: team.name,
@@ -427,16 +563,27 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
       });
 
       if (!synthRes.ok) {
-        throw new Error('Sintesis laporan akhir Boss gagal');
+        const errMsg = await parseErrorResponse(synthRes, 'Sintesis laporan akhir Boss gagal');
+        throw new Error(errMsg);
       }
 
       const synthData = await synthRes.json();
+      const synthKeySuffix = synthData.keyUsedSuffix ? ` [Key: ...${synthData.keyUsedSuffix}]` : '';
+
+      if (synthData.attemptsLog && synthData.attemptsLog.length > 1) {
+        onAddLog({
+          jobId,
+          agentName: team.boss.name,
+          eventType: 'PLAN_WARNING',
+          message: `Rotasi Key Boss Synthesis: ${synthData.attemptsLog.join(' → ')}`,
+        });
+      }
 
       onAddLog({
         jobId,
         agentName: team.boss.name,
         eventType: 'SYNTHESIS_COMPLETED',
-        message: `${team.boss.name} selesai menyusun Laporan Akhir Super Strong!`,
+        message: `${team.boss.name} selesai menyusun Laporan Akhir Super Strong!${synthKeySuffix}`,
         tokens: synthData.tokens,
       });
 
@@ -451,15 +598,25 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
         completedAt: new Date().toISOString(),
       });
     } catch (err: any) {
-      console.error('Job execution failed:', err);
-      onAddLog({
-        jobId,
-        agentName: team.boss.name,
-        eventType: 'TASK_ERROR',
-        message: `Gangguan alur kerja multi-agent: ${err.message}`,
-      });
+      if (err.name === 'AbortError' || isStoppedRef.current) {
+        onAddLog({
+          jobId,
+          agentName: team.boss.name,
+          eventType: 'TASK_ERROR',
+          message: `Proses alur kerja dihentikan secara manual oleh pengguna.`,
+        });
+      } else {
+        console.error('Job execution failed:', err);
+        onAddLog({
+          jobId,
+          agentName: team.boss.name,
+          eventType: 'TASK_ERROR',
+          message: `Gangguan alur kerja multi-agent: ${err.message}`,
+        });
+      }
     } finally {
       setIsExecuting(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -485,11 +642,11 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
     <div className="space-y-6 animate-in fade-in duration-300">
       {/* Top Banner: Control Room Live Header */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl relative overflow-hidden">
-        <div className="absolute -right-10 -top-10 w-48 h-48 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute -right-10 -top-10 w-48 h-48 bg-[#fe4c6f]/10 rounded-full blur-3xl pointer-events-none" />
 
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
           <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-700 flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-indigo-500/20">
+            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#fe4c6f] to-rose-600 flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-[#fe4c6f]/20">
               <Bot className="w-7 h-7" />
             </div>
             <div>
@@ -519,7 +676,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
                 Orkestrasi Multi-Agent
               </div>
             </div>
-            <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold text-xs border border-indigo-500/30">
+            <div className="w-8 h-8 rounded-lg bg-[#fe4c6f]/20 text-[#fe4c6f] flex items-center justify-center font-bold text-xs border border-[#fe4c6f]/30">
               AI
             </div>
           </div>
@@ -571,7 +728,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
               onClick={() => onOpenAgentModal(member, task)}
               className={`p-4 rounded-2xl border transition-all cursor-pointer relative flex flex-col justify-between ${
                 status === 'WORKING'
-                  ? 'bg-indigo-950/40 border-indigo-500 ring-1 ring-indigo-500 shadow-lg shadow-indigo-500/20'
+                  ? 'bg-rose-950/40 border-[#fe4c6f] ring-1 ring-[#fe4c6f] shadow-lg shadow-[#fe4c6f]/20'
                   : status === 'DONE'
                   ? 'bg-slate-900/90 border-emerald-500/50 hover:border-emerald-500'
                   : status === 'ERROR'
@@ -614,13 +771,13 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
               {/* Progress bar for working status */}
               {status === 'WORKING' && (
                 <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden mb-2">
-                  <div className="h-full bg-indigo-500 animate-pulse w-3/4 rounded-full" />
+                  <div className="h-full bg-[#fe4c6f] animate-pulse w-3/4 rounded-full" />
                 </div>
               )}
 
               <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
                 <span>Model: {member.model}</span>
-                <span className="text-indigo-400 flex items-center gap-1 font-semibold group-hover:underline">
+                <span className="text-[#fe4c6f] flex items-center gap-1 font-semibold group-hover:underline">
                   <Eye className="w-3.5 h-3.5" /> Detail
                 </span>
               </div>
@@ -629,66 +786,189 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
         })}
       </div>
 
-      {/* Control Box: Send Instruction to Boss AI */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-indigo-400" />
-            <h3 className="text-sm font-bold text-slate-100">
-              Beri Instruksi ke Boss ({team.boss.name})
-            </h3>
+      {/* Control Box Grid: 3 Cols Instruction + 1 Col Real-Time Log */}
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+        {/* Send Instruction to Boss AI (3 Columns) */}
+        <div className="lg:col-span-3 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-4">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-[#fe4c6f]" />
+                <h3 className="text-sm font-bold text-slate-100">
+                  Beri Instruksi ke Boss ({team.boss.name})
+                </h3>
+              </div>
+              <span className="text-xs text-slate-400">
+                Boss akan mendelegasikan ke {activeMembers.length} agent aktif
+              </span>
+            </div>
+
+            {/* Quick Prompts */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+              {PRESET_PROMPTS.map((p, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => handleRunJob(p.text)}
+                  disabled={isExecuting}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-[#fe4c6f]/20 hover:border-[#fe4c6f]/50 border border-slate-700/80 text-slate-300 hover:text-[#fe4c6f] text-xs font-medium whitespace-nowrap transition-all shrink-0 flex items-center gap-1.5"
+                >
+                  <Lightbulb className="w-3.5 h-3.5 text-amber-400" />
+                  {p.title}
+                </button>
+              ))}
+            </div>
+
+            {/* Input Text Area & Actions */}
+            <div className="space-y-3">
+              <textarea
+                rows={3}
+                value={instruction}
+                onChange={(e) => setInstruction(e.target.value)}
+                placeholder="Ketik instruksi bisnis UMKM Anda di sini... (Contoh: Tolong buatkan strategi promosi produk sambal kemasan untuk bulan Ramadan, lengkap dengan riset harga kompetitor dan skrip penawaran WA)"
+                className="w-full bg-slate-950/80 border border-slate-700/90 rounded-2xl p-4 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-[#fe4c6f] focus:ring-1 focus:ring-[#fe4c6f] resize-none"
+              />
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <span className="text-xs text-slate-400 flex items-center gap-1.5">
+                  {isExecuting ? (
+                    <>
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                      <span className="text-emerald-400 font-semibold">Tim AI sedang mengeksekusi tugas...</span>
+                    </>
+                  ) : (
+                    <span>Ketik instruksi atau pilih salah satu instruksi cepat di atas</span>
+                  )}
+                </span>
+
+                <div className="flex items-center gap-2.5">
+                  {/* Stop / Berhenti Button */}
+                  <button
+                    onClick={handleStopJob}
+                    disabled={!isExecuting}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-lg ${
+                      isExecuting
+                        ? 'bg-rose-600/90 hover:bg-rose-600 text-white border border-rose-500/80 shadow-rose-600/30 active:scale-95 animate-pulse'
+                        : 'bg-slate-800/50 text-slate-500 border border-slate-700/50 cursor-not-allowed opacity-40'
+                    }`}
+                    title={
+                      isExecuting
+                        ? 'Hentikan proses kerja AI sekarang'
+                        : 'Tombol berhenti (aktif saat proses sedang berjalan)'
+                    }
+                  >
+                    <OctagonX className="w-4 h-4 text-rose-200" />
+                    <span>Berhenti</span>
+                  </button>
+
+                  {/* Jalankan Tim Button */}
+                  <button
+                    onClick={() => handleRunJob()}
+                    disabled={!instruction.trim() || isExecuting}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-2 transition-all shadow-lg ${
+                      !instruction.trim() || isExecuting
+                        ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+                        : 'bg-gradient-to-r from-[#fe4c6f] to-rose-600 hover:opacity-90 shadow-[#fe4c6f]/25 active:scale-95'
+                    }`}
+                  >
+                    {isExecuting ? (
+                      <>
+                        <span className="w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                        Memproses...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-4 h-4" />
+                        Jalankan Tim
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
-          <span className="text-xs text-slate-400">
-            Boss akan mendelegasikan ke {activeMembers.length} agent aktif
-          </span>
         </div>
 
-        {/* Quick Prompts */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
-          {PRESET_PROMPTS.map((p, idx) => (
-            <button
-              key={idx}
-              onClick={() => handleRunJob(p.text)}
-              disabled={isExecuting}
-              className="px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-indigo-600/20 hover:border-indigo-500/50 border border-slate-700/80 text-slate-300 hover:text-indigo-300 text-xs font-medium whitespace-nowrap transition-all shrink-0 flex items-center gap-1.5"
-            >
-              <Lightbulb className="w-3.5 h-3.5 text-amber-400" />
-              {p.title}
-            </button>
-          ))}
-        </div>
-
-        {/* Input Text Area */}
-        <div className="relative">
-          <textarea
-            rows={3}
-            value={instruction}
-            onChange={(e) => setInstruction(e.target.value)}
-            placeholder="Ketik instruksi bisnis UMKM Anda di sini... (Contoh: Tolong buatkan strategi promosi produk sambal kemasan untuk bulan Ramadan, lengkap dengan riset harga kompetitor dan skrip penawaran WA)"
-            className="w-full bg-slate-950/80 border border-slate-700/90 rounded-2xl p-4 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 resize-none pr-32"
-          />
-
-          <button
-            onClick={() => handleRunJob()}
-            disabled={!instruction.trim() || isExecuting}
-            className={`absolute right-3 bottom-4 px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-2 transition-all shadow-lg ${
-              !instruction.trim() || isExecuting
-                ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
-                : 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:opacity-90 shadow-indigo-600/25 active:scale-95'
-            }`}
-          >
-            {isExecuting ? (
-              <>
-                <span className="w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
-                Sintesis...
-              </>
-            ) : (
-              <>
-                <Send className="w-4 h-4" />
-                Jalankan Tim
-              </>
+        {/* Real-Time Log Panel (1 Column) */}
+        <div className="lg:col-span-1 bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl flex flex-col justify-between">
+          <div className="flex items-center justify-between pb-2.5 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4 text-[#fe4c6f]" />
+              <h3 className="text-xs font-bold text-slate-100">Log Real-Time</h3>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isExecuting ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'
+                }`}
+              />
+            </div>
+            {onOpenLogs && (
+              <button
+                onClick={onOpenLogs}
+                className="text-[11px] text-[#fe4c6f] hover:text-rose-400 font-medium hover:underline"
+              >
+                Lihat Semua
+              </button>
             )}
-          </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto max-h-[170px] my-2 space-y-2 pr-1 text-[11px]">
+            {logs && logs.length > 0 ? (
+              logs.slice(0, 5).map((log) => (
+                <div
+                  key={log.id}
+                  className="p-2 rounded-xl bg-slate-950/70 border border-slate-800/90 space-y-1"
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-semibold text-slate-200 truncate max-w-[110px]">
+                      {log.agentName}
+                    </span>
+                    <span
+                      className={`text-[8.5px] uppercase font-bold px-1.5 py-0.2 rounded border ${
+                        log.eventType === 'PLAN_WARNING'
+                          ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                          : log.eventType === 'TASK_ERROR'
+                          ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                          : log.eventType === 'TASK_COMPLETED' || log.eventType === 'SYNTHESIS_COMPLETED'
+                          ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                          : 'bg-slate-800 text-slate-400 border-slate-700'
+                      }`}
+                    >
+                      {log.eventType.replace('_', ' ')}
+                    </span>
+                  </div>
+                  <p className="text-slate-400 line-clamp-2 text-[10.5px] leading-snug">
+                    {log.message}
+                  </p>
+                  <div className="text-[9px] text-slate-500 text-right font-mono">
+                    {new Date(log.timestamp).toLocaleTimeString('id-ID', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                    })}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="h-full min-h-[120px] flex flex-col items-center justify-center text-center p-3 text-slate-500 space-y-1">
+                <Clock className="w-5 h-5 text-slate-600 mb-1" />
+                <p className="text-xs font-semibold text-slate-400">Belum Ada Aktivitas</p>
+                <p className="text-[10px] text-slate-500 leading-tight">
+                  Log aktivitas orkestrasi tim AI akan muncul di sini secara real-time.
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-slate-500 font-medium">
+            <span>Aktivitas: {logs?.length || 0} event</span>
+            <span className="flex items-center gap-1.5 text-slate-400">
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isExecuting ? 'bg-indigo-400 animate-ping' : 'bg-emerald-400'
+                }`}
+              />
+              {isExecuting ? 'Memproses...' : 'Standby'}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -834,6 +1114,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
               {/* Rendered Synthesis Content */}
               <div className="p-6 bg-slate-950/90 border border-slate-800 rounded-2xl text-slate-200 text-sm leading-relaxed font-sans max-h-[600px] overflow-y-auto">
                 <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
                   components={{
                     h1: ({ children }) => <h1 className="text-lg font-bold text-indigo-300 mt-4 mb-2 border-b border-slate-800 pb-1">{children}</h1>,
                     h2: ({ children }) => <h2 className="text-base font-bold text-indigo-400 mt-4 mb-2 border-b border-slate-800/80 pb-1">{children}</h2>,
@@ -845,6 +1126,16 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
                     blockquote: ({ children }) => <blockquote className="border-l-4 border-indigo-500 pl-3 my-2 text-slate-400 italic bg-slate-900/60 py-1.5 rounded-r">{children}</blockquote>,
                     strong: ({ children }) => <strong className="font-bold text-slate-100">{children}</strong>,
                     code: ({ children }) => <code className="bg-slate-800 text-indigo-300 px-1.5 py-0.5 rounded text-xs font-mono">{children}</code>,
+                    table: ({ children }) => (
+                      <div className="overflow-x-auto my-4 rounded-xl border border-slate-800 shadow-md">
+                        <table className="w-full text-left text-xs border-collapse">{children}</table>
+                      </div>
+                    ),
+                    thead: ({ children }) => <thead className="bg-slate-800/90 text-indigo-300 font-bold border-b border-slate-700/80">{children}</thead>,
+                    tbody: ({ children }) => <tbody className="divide-y divide-slate-800/80 text-slate-300">{children}</tbody>,
+                    tr: ({ children }) => <tr className="hover:bg-slate-800/40 transition-colors">{children}</tr>,
+                    th: ({ children }) => <th className="px-3 py-2.5 font-bold">{children}</th>,
+                    td: ({ children }) => <td className="px-3 py-2.5">{children}</td>,
                   }}
                 >
                   {currentJob.finalSynthesis}
