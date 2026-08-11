@@ -84,19 +84,73 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
     setTestResults(null);
 
     try {
-      const res = await fetch('/api/test-keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys: parsedKeys }),
-      });
-      const data = await res.json();
-      if (data.results) {
-        setTestResults(data.results);
-      } else if (data.error) {
-        alert(`Error tes API key: ${data.error}`);
+      let serverSuccess = false;
+
+      // 1. Try server endpoint first
+      try {
+        const res = await fetch('/api/test-keys', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keys: parsedKeys }),
+        });
+
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
+          const data = await res.json();
+          if (Array.isArray(data?.results)) {
+            setTestResults(data.results);
+            serverSuccess = true;
+          }
+        }
+      } catch {
+        // Server route unavailable or returned non-JSON html, fallback to direct client test
+      }
+
+      // 2. Direct client-side validation against Google Gemini API
+      if (!serverSuccess) {
+        const directResults = await Promise.all(
+          parsedKeys.map(async (key) => {
+            const trimmed = key.trim();
+            const keySuffix = trimmed.length >= 4 ? trimmed.slice(-4) : trimmed;
+
+            if (!trimmed) {
+              return { keySuffix: '????', valid: false, error: 'Key kosong' };
+            }
+
+            try {
+              const googleRes = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash?key=${encodeURIComponent(trimmed)}`
+              );
+
+              if (googleRes.ok) {
+                return { keySuffix, valid: true };
+              }
+
+              let errorMsg = 'API Key Gemini tidak valid atau kuota habis';
+              try {
+                const errData = await googleRes.json();
+                if (errData?.error?.message) {
+                  errorMsg = errData.error.message;
+                }
+              } catch {
+                // Non-JSON error
+              }
+
+              return { keySuffix, valid: false, error: errorMsg };
+            } catch (err: any) {
+              return {
+                keySuffix,
+                valid: false,
+                error: err?.message || 'Gagal terhubung ke Google Gemini API',
+              };
+            }
+          })
+        );
+
+        setTestResults(directResults);
       }
     } catch (err: any) {
-      alert(`Gagal menghubungi server untuk tes API key: ${err.message}`);
+      alert(`Gagal melakukan pengujian API Key: ${err?.message || 'Unknown error'}`);
     } finally {
       setIsTestingKeys(false);
     }
@@ -211,23 +265,38 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
               <div className="text-xs font-semibold text-slate-300 flex items-center justify-between border-b border-slate-800 pb-1.5">
                 <span>Hasil Pengujian Koneksi:</span>
-                <span className="text-[11px] text-slate-400">
-                  {testResults.filter((r) => r.valid).length} / {testResults.length} Valid
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-400 font-normal">
+                    {testResults.filter((r) => r.valid).length} / {testResults.length} Valid
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleTestKeys}
+                    disabled={isTestingKeys}
+                    className="flex items-center gap-1 text-[10px] font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 px-2 py-0.5 rounded border border-indigo-500/30 transition-colors"
+                  >
+                    {isTestingKeys ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3 h-3" />
+                    )}
+                    Uji Ulang
+                  </button>
+                </div>
               </div>
-              <div className="space-y-1 max-h-32 overflow-y-auto pr-1">
+              <div className="space-y-1 max-h-36 overflow-y-auto pr-1">
                 {testResults.map((res, i) => (
                   <div
                     key={i}
-                    className="flex items-center justify-between text-xs py-1 px-2 rounded bg-slate-900/60"
+                    className="flex items-center justify-between text-xs py-1.5 px-2.5 rounded bg-slate-900/60 border border-slate-800/60"
                   >
-                    <span className="font-mono text-slate-300">Key ...{res.keySuffix}</span>
+                    <span className="font-mono text-slate-300 font-medium">Key ...{res.keySuffix}</span>
                     {res.valid ? (
-                      <span className="flex items-center gap-1 text-emerald-400 font-medium">
+                      <span className="flex items-center gap-1 text-emerald-400 font-medium text-[11px]">
                         <CheckCircle2 className="w-3.5 h-3.5" /> Valid & Koneksi OK
                       </span>
                     ) : (
-                      <span className="flex items-center gap-1 text-rose-400 font-medium truncate max-w-[200px]" title={res.error}>
+                      <span className="flex items-center gap-1 text-rose-400 font-medium text-[11px] truncate max-w-[220px]" title={res.error}>
                         <X className="w-3.5 h-3.5 shrink-0" /> {res.error || 'Gagal'}
                       </span>
                     )}
