@@ -371,7 +371,7 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
               }
               return t;
             });
-            break;
+            setCurrentJob((prev) => (prev ? { ...prev, tasks: [...runningTasks] } : null));
           }
         }
 

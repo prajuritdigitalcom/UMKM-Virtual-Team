@@ -353,16 +353,21 @@ export function exportToPdf(title: string, content: string) {
             const colWidth = maxWidth / Math.max(numCols, 1);
 
             rows.forEach((row, rowIndex) => {
-              if (y > pageHeight - 25) {
+              const isHeader = rowIndex === 0;
+              const lineHeight = isHeader ? 4.5 : 4.2;
+
+              const wrappedCells = row.map((cellText) => doc.splitTextToSize(cellText, colWidth - 4));
+              const maxLines = Math.max(...wrappedCells.map((w) => w.length), 1);
+              const rowHeight = maxLines * lineHeight + 3;
+
+              if (y + rowHeight > pageHeight - 20) {
                 doc.addPage();
                 y = 20;
               }
 
-              const isHeader = rowIndex === 0;
-
               if (isHeader) {
-                doc.setFillColor(241, 245, 249); // light bg for header
-                doc.rect(margin, y - 4, maxWidth, 8, 'F');
+                doc.setFillColor(241, 245, 249);
+                doc.rect(margin, y - 4, maxWidth, rowHeight, 'F');
                 doc.setFont('helvetica', 'bold');
                 doc.setFontSize(9);
                 doc.setTextColor(30, 58, 138);
@@ -372,18 +377,18 @@ export function exportToPdf(title: string, content: string) {
                 doc.setTextColor(30, 41, 59);
               }
 
-              row.forEach((cellText, colIndex) => {
+              wrappedCells.forEach((wrapped, colIndex) => {
                 const cellX = margin + colIndex * colWidth + 2;
-                const wrapped = doc.splitTextToSize(cellText, colWidth - 4);
-                doc.text(wrapped[0] || '', cellX, y);
+                wrapped.forEach((lineText, lineIdx) => {
+                  doc.text(lineText, cellX, y + lineIdx * lineHeight);
+                });
               });
 
-              // Bottom border line for row
               doc.setDrawColor(226, 232, 240);
               doc.setLineWidth(0.2);
-              doc.line(margin, y + 2, margin + maxWidth, y + 2);
+              doc.line(margin, y + rowHeight - 2, margin + maxWidth, y + rowHeight - 2);
 
-              y += isHeader ? 8 : 7;
+              y += rowHeight;
             });
 
             y += 4;

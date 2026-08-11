@@ -61,7 +61,21 @@ function getAvailableKeys(req: express.Request): string[] {
   return [];
 }
 
-function isKeyRelatedError(message: string): boolean {
+function parseRetryDelayMs(message: string): number | null {
+  const match = (message || '').match(/retry in\s+(\d+(?:\.\d+)?)\s*s/i);
+  if (match) {
+    const seconds = parseFloat(match[1]);
+    if (!isNaN(seconds)) return Math.ceil(seconds * 1000) + 1000;
+  }
+  return null;
+}
+
+function isDailyQuotaError(message: string): boolean {
+  return /PerDay/i.test(message || '');
+}
+
+function isKeyRelatedError(message: string, statusCode?: number): boolean {
+  if (statusCode === 429 || statusCode === 403 || statusCode === 401) return true;
   return /api key not valid|permission denied|unauthenticated|quota|429|rate limit|resource_exhausted|invalid_argument.*key/i.test(
     message || ''
   );
@@ -107,17 +121,34 @@ async function generateWithKeyFailover(
     } catch (err: any) {
       lastError = err;
       const errMsg = err?.message || String(err);
+      const statusCode = err?.status;
       attemptsLog.push(`[Key ...${keySuffix}] Error: ${errMsg}`);
 
-      if (isKeyRelatedError(errMsg)) {
-        // Cooldown key for 5 minutes
-        keyCooldowns.set(apiKey, Date.now() + 5 * 60 * 1000);
-        console.warn(`[API Key Failover] Key ...${keySuffix} bermasalah. Mencoba key berikutnya...`);
+      if (isKeyRelatedError(errMsg, statusCode)) {
+        let cooldownMs = 5 * 60 * 1000;
+        const preciseDelay = parseRetryDelayMs(errMsg);
+        if (preciseDelay) {
+          cooldownMs = preciseDelay;
+        } else if (isDailyQuotaError(errMsg)) {
+          cooldownMs = 6 * 60 * 60 * 1000;
+        }
+        keyCooldowns.set(apiKey, Date.now() + cooldownMs);
+        console.warn(`[API Key Failover] Key ...${keySuffix} bermasalah (cooldown ~${Math.round(cooldownMs / 1000)}s). Mencoba key berikutnya...`);
       } else {
         // Non-key error (syntax, content policy, etc) - throw immediately
         throw err;
       }
     }
+  }
+
+  const anyKeyActuallyAttempted = attemptsLog.some((log) => log.includes('] Error:'));
+
+  if (!anyKeyActuallyAttempted && keys.length > 0) {
+    const earliestAvailable = Math.min(...keys.map((k) => keyCooldowns.get(k) || 0));
+    const waitSeconds = Math.max(0, Math.ceil((earliestAvailable - Date.now()) / 1000));
+    throw new Error(
+      `Semua ${keys.length} API Key sedang dalam masa cooldown akibat limit. Coba lagi dalam sekitar ${waitSeconds} detik, atau tambahkan key dari akun Google lain.`
+    );
   }
 
   throw new Error(
@@ -428,6 +459,8 @@ Ingat Standar Kualitas "Super Strong":
 - Ikuti format output wajib sesuai jobdesk role-mu.
 `;
 
+    const ROLES_NEED_GROUNDING = new Set(['research', 'tax', 'legal', 'ads', 'ecommerce', 'seo']);
+
     let accumulatedResult = '';
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
@@ -441,16 +474,22 @@ Ingat Standar Kualitas "Super Strong":
     while (!isFinished && attempts <= maxContinuations) {
       attempts++;
 
+      const execConfig: any = {
+        systemInstruction: agent.systemPrompt,
+        maxOutputTokens: 16384, // Optimized token budget for specialist agents
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.MEDIUM,
+        },
+      };
+
+      if (ROLES_NEED_GROUNDING.has(agent.role)) {
+        execConfig.tools = [{ googleSearch: {} }];
+      }
+
       const { response, keyUsedSuffix, attemptsLog } = await generateWithKeyFailover(req, {
         model: agent.model || 'gemini-3.6-flash',
         contents: contentsHistory,
-        config: {
-          systemInstruction: agent.systemPrompt,
-          maxOutputTokens: 16384, // Optimized token budget for specialist agents
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.MEDIUM,
-          },
-        },
+        config: execConfig,
       });
 
       lastKeyUsedSuffix = keyUsedSuffix;

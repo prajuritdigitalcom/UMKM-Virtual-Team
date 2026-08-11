@@ -22,6 +22,8 @@ interface TeamWizardProps {
   onCreateTeam: (team: Team) => void;
 }
 
+const MAX_MEMBERS = MEMBER_PRESETS.length;
+
 export const TeamWizard: React.FC<TeamWizardProps> = ({
   isOpen,
   onClose,
@@ -81,8 +83,8 @@ export const TeamWizard: React.FC<TeamWizardProps> = ({
     if (selectedMemberRoles.includes(role)) {
       setSelectedMemberRoles(selectedMemberRoles.filter((r) => r !== role));
     } else {
-      // Enforce constraint: max 7 members
-      if (selectedMemberRoles.length >= 7) {
+      // Enforce constraint: max members
+      if (selectedMemberRoles.length >= MAX_MEMBERS) {
         return; // UI limit reached
       }
       setSelectedMemberRoles([...selectedMemberRoles, role]);
@@ -255,25 +257,25 @@ export const TeamWizard: React.FC<TeamWizardProps> = ({
                     Pilih Anggota Tim AI Spesialis
                   </div>
                   <p className="text-xs text-slate-400 mt-1">
-                    Pilih hingga <span className="font-bold text-indigo-300">maksimal 7 agent</span> agar eksekusi komprehensif, fokus, dan cepat.
+                    Pilih hingga <span className="font-bold text-indigo-300">maksimal {MAX_MEMBERS} agent</span> agar eksekusi komprehensif, fokus, dan cepat.
                   </p>
                 </div>
                 <div className="px-3 py-1 bg-slate-800 border border-slate-700 rounded-full text-xs font-semibold text-indigo-300">
-                  {selectedMemberRoles.length} / 7 Terpilih
+                  {selectedMemberRoles.length} / {MAX_MEMBERS} Terpilih
                 </div>
               </div>
 
-              {selectedMemberRoles.length >= 7 && (
+              {selectedMemberRoles.length >= MAX_MEMBERS && (
                 <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center gap-2 text-xs text-amber-300">
                   <AlertCircle className="w-4 h-4 shrink-0" />
-                  Batas maksimal 7 agent aktif tercapai. Uncheck agent untuk mengganti pilihan.
+                  Batas maksimal {MAX_MEMBERS} agent aktif tercapai. Uncheck agent untuk mengganti pilihan.
                 </div>
               )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                 {MEMBER_PRESETS.map((m) => {
                   const isSelected = selectedMemberRoles.includes(m.role);
-                  const isLimitReached = !isSelected && selectedMemberRoles.length >= 7;
+                  const isLimitReached = !isSelected && selectedMemberRoles.length >= MAX_MEMBERS;
 
                   return (
                     <div

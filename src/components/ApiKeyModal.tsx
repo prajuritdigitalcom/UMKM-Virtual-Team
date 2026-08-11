@@ -205,6 +205,16 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             </div>
           </div>
 
+          <div className="flex items-start gap-2 text-xs text-sky-300 bg-sky-500/10 border border-sky-500/20 px-3 py-2 rounded-lg">
+            <AlertCircle className="w-4 h-4 shrink-0 text-sky-400 mt-0.5" />
+            <span>
+              <strong>Tips rotasi:</strong> kuota gratis Gemini berlaku per akun Google (per project), bukan
+              per API Key. Menambahkan beberapa key dari akun Google yang sama <strong>tidak menambah kuota</strong> —
+              semuanya berbagi jatah yang sama dan bisa mentok bersamaan. Agar rotasi benar-benar efektif,
+              gunakan key dari beberapa akun Google yang berbeda.
+            </span>
+          </div>
+
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
               <label className="font-medium text-slate-300 flex items-center gap-1.5">
