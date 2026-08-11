@@ -130,14 +130,25 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
         {/* Content Body */}
         <div className="p-6 space-y-4 overflow-y-auto">
-          <div className="bg-slate-800/60 border border-slate-700/60 rounded-xl p-3.5 text-xs text-slate-300 space-y-1.5">
+          <div className="bg-slate-800/60 border border-slate-700/60 rounded-xl p-3.5 text-xs text-slate-300 space-y-2">
             <div className="flex items-center gap-2 font-semibold text-amber-400">
               <Sparkles className="w-4 h-4" />
-              <span>Multi-Key Failover & Rolling Rotation</span>
+              <span>Mengapa Wajib Mengisi Gemini API Key?</span>
             </div>
-            <p className="text-slate-400">
-              Masukkan <strong>1 API Key per baris</strong>. Jika satu key terkena limit/error, sistem otomatis berpindah ke key sehat berikutnya dalam pool tanpa menghentikan pekerjaan tim.
+            <p className="text-slate-300 leading-relaxed">
+              Aplikasi ini menggerakkan tim Multi-Agent AI langsung menggunakan model Google Gemini. Agar agen AI dapat memproses instruksi dan menghasilkan laporan bisnis Anda, Anda perlu memasukkan API Key pribadi.
             </p>
+            <div className="pt-1 flex items-center justify-between border-t border-slate-700/50 text-[11px]">
+              <span className="text-slate-400">Belum punya API Key? Gratis dari Google:</span>
+              <a
+                href="https://aistudio.google.com/app/apikey"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-amber-400 hover:text-amber-300 underline font-semibold flex items-center gap-1"
+              >
+                Ambil API Key Gratis di Google AI Studio ↗
+              </a>
+            </div>
           </div>
 
           <div className="space-y-2">

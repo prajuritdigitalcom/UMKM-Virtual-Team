@@ -161,14 +161,38 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Interactive Gemini Key Button */}
           <button
             onClick={onOpenApiKeyModal}
-            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700/80 border border-slate-700 hover:border-[#fe4c6f]/50 text-slate-200 text-xs font-medium px-3 py-2 rounded-lg transition-all group"
-            title="Klik untuk Pengaturan Gemini API Keys"
+            className={`flex items-center gap-2 border text-xs font-medium px-3 py-1.5 rounded-xl transition-all group ${
+              apiKeysCount > 0
+                ? 'bg-slate-800 hover:bg-slate-700/80 border-slate-700 hover:border-[#fe4c6f]/50 text-slate-200'
+                : 'bg-amber-500/10 hover:bg-amber-500/20 border-amber-500/40 text-amber-200 shadow-sm shadow-amber-500/10'
+            }`}
+            title={
+              apiKeysCount > 0
+                ? 'Klik untuk Kelola Google Gemini API Key Anda'
+                : 'PENTING: Anda Belum Mengisi API Key Gemini. Klik di sini untuk memasukkan Key Anda.'
+            }
           >
-            <Key className="w-3.5 h-3.5 text-[#fe4c6f] group-hover:scale-110 transition-transform" />
-            <span className="text-slate-400">Gemini Key:</span>
-            <span className="text-emerald-400 font-mono font-semibold">
-              {apiKeysCount > 0 ? `${apiKeysCount} Aktif` : 'Tersambung'}
-            </span>
+            <Key
+              className={`w-4 h-4 group-hover:scale-110 transition-transform ${
+                apiKeysCount > 0 ? 'text-[#fe4c6f]' : 'text-amber-400 animate-pulse'
+              }`}
+            />
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 hidden sm:inline">Gemini Key:</span>
+              {apiKeysCount > 0 ? (
+                <span className="text-emerald-400 font-mono font-bold flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  {apiKeysCount} Key Aktif
+                </span>
+              ) : (
+                <span className="text-amber-300 font-bold flex items-center gap-1.5">
+                  <span className="text-amber-400 font-semibold">Belum Diisi</span>
+                  <span className="bg-amber-500/20 text-amber-200 text-[10px] px-2 py-0.5 rounded-md border border-amber-500/40 uppercase tracking-wide font-bold">
+                    Isi Key
+                  </span>
+                </span>
+              )}
+            </div>
           </button>
         </div>
       </div>
