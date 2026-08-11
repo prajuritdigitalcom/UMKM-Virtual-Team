@@ -286,7 +286,11 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
                 });
 
                 if (!execRes.ok) {
-                  throw new Error(`Execution error for agent ${agentObj.name}`);
+                  const execErr: any = new Error(
+                    `Execution error for agent ${agentObj.name} (HTTP ${execRes.status})`
+                  );
+                  execErr.status = execRes.status;
+                  throw execErr;
                 }
 
                 execData = await execRes.json();
@@ -295,6 +299,18 @@ export const ControlRoom: React.FC<ControlRoomProps> = ({
               } catch (err: any) {
                 lastError = err;
                 attempt++;
+
+                // Client error (4xx selain 429 rate-limit) akan gagal dengan cara
+                // yang persis sama kalau diulang — jangan buang jatah retry untuk ini.
+                const isNonRetryableClientError =
+                  typeof err.status === 'number' &&
+                  err.status >= 400 &&
+                  err.status < 500 &&
+                  err.status !== 429;
+
+                if (isNonRetryableClientError) {
+                  break;
+                }
 
                 if (attempt <= taskToRun.maxRetries) {
                   onAddLog({

@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -95,6 +95,9 @@ Setiap elemen array mewakili sub-tugas untuk 1 agent:
             },
             required: ['agentId', 'agentName', 'role', 'instruction', 'dependsOn'],
           },
+        },
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.HIGH,
         },
       },
     });
@@ -212,8 +215,10 @@ Ingat Standar Kualitas "Super Strong":
         contents: currentPrompt,
         config: {
           systemInstruction: agent.systemPrompt,
-          temperature: 0.7,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 65536,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.MEDIUM,
+          },
         },
       });
 
@@ -322,8 +327,10 @@ Format Laporan Akhir Disarankan:
         contents: currentPrompt,
         config: {
           systemInstruction: boss.systemPrompt,
-          temperature: 0.7,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 65536,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.HIGH,
+          },
         },
       });
 
